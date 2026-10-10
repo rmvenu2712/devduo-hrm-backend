@@ -33,7 +33,9 @@ final class AnnouncementService
     {
         $tracking = AnnouncementRead::where('announcement_id', $announcement->id)->where('user_id', $viewer->id)->first();
         $status = $announcement->expires_at && $announcement->expires_at->lt(TenantClock::today()) ? 'expired' : $announcement->status;
+        $announcement->loadMissing('attachments');
         return ['uuid' => $announcement->uuid, 'title' => $announcement->title, 'body' => $announcement->body,
+            'attachments' => $announcement->attachments->map(fn ($a) => ['uuid' => $a->uuid, 'filename' => $a->filename, 'mime_type' => $a->mime_type, 'size_bytes' => $a->size_bytes])->values()->all(),
             'communication_type' => $announcement->communication_type ?? 'announcement', 'event_starts_at' => $announcement->event_starts_at?->toIso8601String(),
             'event_ends_at' => $announcement->event_ends_at?->toIso8601String(), 'event_location' => $announcement->event_location,
             'my_rsvp' => ($announcement->communication_type ?? 'announcement') === 'event' ? \App\Domain\Experience\Models\EventRsvp::where('announcement_id', $announcement->id)->where('user_id', $viewer->id)->value('response') : null,

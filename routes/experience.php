@@ -21,6 +21,8 @@ Route::prefix('v1/experience')->middleware('module:experience')->group(function 
     Route::get('announcements', [Announcements::class, 'index'])->middleware('permission:experience.self|experience.view|experience.ticket.manage|experience.announcement.manage');
     Route::get('announcements/audience-options', [Announcements::class, 'audienceOptions'])->middleware('permission:experience.announcement.manage');
     Route::post('announcements', [Announcements::class, 'create'])->middleware('permission:experience.announcement.manage');
+    Route::post('announcements/{uuid}/attachments', [Announcements::class, 'addAttachment'])->middleware('permission:experience.announcement.manage');
+    Route::get('announcements/{uuid}/attachments/{attachment}', [Announcements::class, 'attachment'])->middleware('permission:experience.self|experience.view|experience.ticket.manage|experience.announcement.manage');
     Route::get('announcements/{uuid}/metrics', [Announcements::class, 'metrics'])->middleware('permission:experience.analytics.view');
     Route::post('announcements/{uuid}/publish', [Announcements::class, 'publish'])->middleware('permission:experience.announcement.manage');
     Route::post('announcements/{uuid}/read', [Announcements::class, 'read'])->middleware('permission:experience.self|experience.view|experience.ticket.manage|experience.announcement.manage');

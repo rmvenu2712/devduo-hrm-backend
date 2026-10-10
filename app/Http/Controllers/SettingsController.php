@@ -19,7 +19,8 @@ class SettingsController extends Controller
     {
         $data = $r->validate(['name' => 'required|string|max:150', 'settings' => 'required|array:timezone,work_week,hr_email,notifications,modules,brand_name',
             'settings.timezone' => 'required|timezone', 'settings.work_week' => 'required|array|min:1|max:7', 'settings.work_week.*' => 'integer|between:0,6|distinct',
-            'settings.hr_email' => 'nullable|email|max:255', 'settings.notifications' => 'required|boolean', 'settings.modules' => 'present|array', 'settings.modules.*' => 'in:work,notifications,people,attendance|distinct', 'settings.brand_name' => 'nullable|string|max:80']);
+            'settings.hr_email' => 'nullable|email|max:255', 'settings.notifications' => 'required|boolean', 'settings.modules' => 'present|array',
+            'settings.modules.*' => [\Illuminate\Validation\Rule::in(\App\Domain\Access\WorkspaceProvisioner::MODULES), 'distinct'], 'settings.brand_name' => 'nullable|string|max:80']);
 
         return DB::transaction(function () use ($r, $data) {
             $tenant = Tenant::whereKey($r->user()->tenant_id)->lockForUpdate()->firstOrFail();

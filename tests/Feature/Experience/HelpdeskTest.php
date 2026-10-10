@@ -16,6 +16,17 @@ class HelpdeskTest extends PerformanceTestCase
             ->assertCreated()->json('uuid');
     }
 
+    public function test_service_category_routes_new_tickets_to_its_default_owner(): void
+    {
+        $category = $this->postJson('/api/v1/experience/service-categories', [
+            'code' => 'HR-OPS', 'name' => 'HR Operations', 'target_hours' => 24, 'default_assignee_id' => $this->admin->id,
+        ])->assertCreated()->json();
+        $this->actAs($this->emp1);
+        $ticket = $this->postJson('/api/v1/experience/tickets', ['category_uuid' => $category['uuid'], 'subject' => 'HR operations question', 'description' => 'Please route this request.'])
+            ->assertCreated()->assertJsonPath('assignee_id', $this->admin->id)->json();
+        $this->assertSame($this->admin->id, \DB::table('experience_tickets')->where('uuid', $ticket['uuid'])->value('assignee_id'));
+    }
+
     public function test_private_notes_are_hidden_from_employee_and_manager(): void
     {
         $ticket = $this->openTicket();

@@ -55,6 +55,14 @@ return [
             'report' => false,
         ],
 
+        'operations_private' => [
+            'driver' => 'local',
+            'root' => storage_path('app/private/operations'),
+            'visibility' => 'private',
+            'throw' => true,
+            'report' => false,
+        ],
+
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),

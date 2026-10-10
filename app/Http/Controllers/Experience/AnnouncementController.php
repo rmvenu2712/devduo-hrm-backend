@@ -4,7 +4,11 @@ namespace App\Http\Controllers\Experience;
 
 use App\Domain\Experience\AnnouncementService;
 use App\Domain\Experience\Models\Announcement;
+use App\Domain\Experience\Models\AnnouncementAttachment;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 final class AnnouncementController
 {
@@ -62,5 +66,37 @@ final class AnnouncementController
     public function metrics(Request $r, string $uuid)
     {
         return $this->announcements->metrics(Announcement::where('uuid', $uuid)->firstOrFail());
+    }
+
+    public function addAttachment(Request $r, string $uuid)
+    {
+        $data = $r->validate(['file' => 'required|file|mimes:pdf,png,jpg,jpeg,doc,docx,xlsx|max:5120']);
+        $announcement = Announcement::where('uuid', $uuid)->firstOrFail();
+        abort_unless($announcement->status === 'draft', 409, 'Attachments can only be added to draft communications.');
+        if ($announcement->attachments()->count() >= 5) throw ValidationException::withMessages(['attachment' => 'A communication can have at most five attachments.']);
+        $file = $data['file'];
+        $id = (string) Str::uuid();
+        $path = 'tenant/'.$r->user()->tenant_id.'/announcements/'.$announcement->uuid.'/'.$id.'.'.$file->extension();
+        Storage::disk('experience_private')->put($path, file_get_contents($file->getRealPath()));
+        try {
+            $attachment = AnnouncementAttachment::create(['uuid' => $id, 'announcement_id' => $announcement->id, 'uploaded_by' => $r->user()->id,
+                'filename' => mb_substr(basename($file->getClientOriginalName()), 0, 255), 'mime_type' => $file->getMimeType() ?: 'application/octet-stream',
+                'size_bytes' => $file->getSize(), 'path' => $path]);
+        } catch (\Throwable $e) {
+            Storage::disk('experience_private')->delete($path);
+            throw $e;
+        }
+        \App\Domain\Audit\Audit::record('announcement.attachment_added', 'experience', 'announcement:'.$announcement->uuid);
+        return response()->json(['uuid' => $attachment->uuid, 'filename' => $attachment->filename, 'mime_type' => $attachment->mime_type, 'size_bytes' => $attachment->size_bytes], 201);
+    }
+
+    public function attachment(Request $r, string $uuid, string $attachment)
+    {
+        $announcement = $this->announcements->visible($r->user())->where('uuid', $uuid)->firstOrFail();
+        abort_unless($announcement->status === 'published', 404);
+        $file = $announcement->attachments()->where('uuid', $attachment)->firstOrFail();
+        abort_unless(Storage::disk('experience_private')->exists($file->path), 404);
+        \App\Domain\Audit\Audit::record('announcement.attachment_accessed', 'experience', 'announcement:'.$announcement->uuid);
+        return Storage::disk('experience_private')->download($file->path, $file->filename, ['X-Content-Type-Options' => 'nosniff', 'Cache-Control' => 'private, no-store']);
     }
 }

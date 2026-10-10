@@ -2,6 +2,8 @@
 
 namespace Tests\Feature\Experience;
 
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
 use Tests\Feature\Performance\PerformanceTestCase;
 
 class AnnouncementsTest extends PerformanceTestCase
@@ -91,5 +93,28 @@ class AnnouncementsTest extends PerformanceTestCase
         $this->getJson('/api/v1/experience/announcements')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.title', 'Getting started');
         $this->actAs($this->emp1);
         $this->getJson('/api/v1/experience/announcements')->assertOk()->assertJsonCount(0, 'data');
+    }
+
+    public function test_announcement_attachments_are_private_and_follow_announcement_audience(): void
+    {
+        Storage::fake('experience_private');
+        $london = $this->hire('Lina London', ['location' => 1, 'role' => 'Team member']);
+        $announcement = $this->postJson('/api/v1/experience/announcements', [
+            'title' => 'Employee guide', 'body' => 'Read the attached guide.',
+            'audience' => ['location_ids' => [$this->org['location'][1]]],
+        ])->assertCreated()->json();
+        $upload = $this->post('/api/v1/experience/announcements/'.$announcement['uuid'].'/attachments', ['file' => UploadedFile::fake()->create('guide.pdf', 120, 'application/pdf')]);
+        $upload->assertCreated()->assertJsonPath('filename', 'guide.pdf');
+        $attachment = $upload->json('uuid');
+        $this->actAs($this->emp1);
+        $this->get('/api/v1/experience/announcements/'.$announcement['uuid'].'/attachments/'.$attachment)->assertNotFound();
+        $this->signIn($this->admin);
+        $this->postJson('/api/v1/experience/announcements/'.$announcement['uuid'].'/publish')->assertOk();
+        $this->actAs($this->emp1);
+        $this->get('/api/v1/experience/announcements/'.$announcement['uuid'].'/attachments/'.$attachment)->assertNotFound();
+        $this->actAs($london);
+        $this->get('/api/v1/experience/announcements/'.$announcement['uuid'].'/attachments/'.$attachment)
+            ->assertOk()->assertHeader('Cache-Control', 'no-store, private')->assertHeader('X-Content-Type-Options', 'nosniff');
+        $this->assertSame(1, \DB::table('audit_logs')->where('action', 'announcement.attachment_accessed')->count());
     }
 }

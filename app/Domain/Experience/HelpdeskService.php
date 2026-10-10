@@ -111,7 +111,7 @@ final class HelpdeskService
     {
         $category = ServiceCategory::where('uuid', $data['category_uuid'])->where('active', true)->firstOrFail();
         $ticket = Ticket::create([
-            'employee_id' => $employee->id, 'category_id' => $category->id, 'requester_id' => $actor->id,
+            'employee_id' => $employee->id, 'category_id' => $category->id, 'requester_id' => $actor->id, 'assignee_id' => $category->default_assignee_id,
             'subject' => $data['subject'], 'description' => $data['description'], 'priority' => 'normal', 'status' => 'open',
             'sla_due_at' => $category->target_hours ? now()->addHours($category->target_hours) : null,
         ]);
@@ -249,7 +249,11 @@ final class HelpdeskService
 
     public function createCategory(array $data): ServiceCategory
     {
+        if (! empty($data['default_assignee_id'])) {
+            $assignee = User::where('tenant_id', app(\App\Domain\Tenancy\TenantContext::class)->id)->where('active', true)->findOrFail($data['default_assignee_id']);
+            if (! $assignee->allows('experience.ticket.manage')) throw ValidationException::withMessages(['default_assignee_id' => 'Choose an active HR service user with ticket management access.']);
+        }
         return ServiceCategory::create(['uuid' => (string) Str::uuid(), 'code' => Str::upper($data['code']), 'name' => $data['name'], 'description' => $data['description'] ?? null,
-            'active' => true, 'target_hours' => $data['target_hours'] ?? null]);
+            'active' => true, 'target_hours' => $data['target_hours'] ?? null, 'default_assignee_id' => $data['default_assignee_id'] ?? null]);
     }
 }

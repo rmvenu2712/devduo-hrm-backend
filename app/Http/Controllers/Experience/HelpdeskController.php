@@ -21,9 +21,10 @@ final class HelpdeskController
         return $this->helpdesk->visibleTickets($r->user())->where('uuid', $uuid)->firstOrFail();
     }
 
-    public function categories()
+    public function categories(Request $r)
     {
-        return $this->helpdesk->categories()->map(fn ($c) => ['uuid' => $c->uuid, 'code' => $c->code, 'name' => $c->name, 'description' => $c->description]);
+        return $this->helpdesk->categories()->map(fn ($c) => ['uuid' => $c->uuid, 'code' => $c->code, 'name' => $c->name, 'description' => $c->description,
+            'default_assignee' => $r->user()->allows('experience.category.manage') && $c->default_assignee_id ? User::whereKey($c->default_assignee_id)->value('name') : null]);
     }
 
     public function health() { return $this->helpdesk->health(); }
@@ -36,9 +37,10 @@ final class HelpdeskController
 
     public function createCategory(Request $r)
     {
-        $d = $r->validate(['code' => ['required', 'string', 'max:40', Rule::unique('experience_service_categories', 'code')->where('tenant_id', $r->user()->tenant_id)], 'name' => 'required|string|max:120', 'description' => 'nullable|string|max:2000', 'target_hours' => 'nullable|integer|min:1|max:8760']);
+        $d = $r->validate(['code' => ['required', 'string', 'max:40', Rule::unique('experience_service_categories', 'code')->where('tenant_id', $r->user()->tenant_id)], 'name' => 'required|string|max:120', 'description' => 'nullable|string|max:2000', 'target_hours' => 'nullable|integer|min:1|max:8760',
+            'default_assignee_id' => ['nullable', 'integer', Rule::exists('users', 'id')->where('tenant_id', $r->user()->tenant_id)]]);
         $category = $this->helpdesk->createCategory($d);
-        return response()->json(['uuid' => $category->uuid, 'code' => $category->code, 'name' => $category->name, 'description' => $category->description, 'target_hours' => $category->target_hours], 201);
+        return response()->json(['uuid' => $category->uuid, 'code' => $category->code, 'name' => $category->name, 'description' => $category->description, 'target_hours' => $category->target_hours, 'default_assignee_id' => $category->default_assignee_id], 201);
     }
 
     public function index(Request $r)

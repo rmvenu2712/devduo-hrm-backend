@@ -140,8 +140,11 @@ class SurveysTest extends PerformanceTestCase
         $this->getJson('/api/v1/experience/surveys/'.$survey['uuid'].'/identified-responses')->assertOk()
             ->assertJsonPath('suppressed', false)->assertJsonPath('responses.0.employee', 'Arun Kumar')
             ->assertJsonPath('responses.0.answers.0.value', 4);
-        $this->assertSame(1, \DB::table('audit_logs')->where('action', 'survey.identified_responses_accessed')->count());
-        $this->assertSame(5, \DB::table('experience_survey_identified_responses')->where('survey_id', \DB::table('experience_surveys')->where('uuid', $survey['uuid'])->value('id'))->count());
+        $surveyId = \DB::table('experience_surveys')->where('uuid', $survey['uuid'])->value('id');
+        \DB::table('experience_surveys')->where('id', $surveyId)->update(['retention_until' => now()->subDay()->toDateString()]);
+        $this->getJson('/api/v1/experience/surveys/'.$survey['uuid'].'/identified-responses')->assertOk()->assertJsonPath('retention_expired', true);
+        $this->assertSame(2, \DB::table('audit_logs')->where('action', 'survey.identified_responses_accessed')->count());
+        $this->assertSame(5, \DB::table('experience_survey_identified_responses')->where('survey_id', $surveyId)->count());
     }
 
     public function test_aggregate_export_sanitizes_spreadsheet_formulas_and_disables_caching(): void

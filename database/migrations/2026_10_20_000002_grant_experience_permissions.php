@@ -9,7 +9,8 @@ return new class extends Migration
     public function up(): void
     {
         $ids = WorkspaceProvisioner::syncCatalog();
-        $all = array_values(array_filter(array_keys($ids), fn ($key) => str_starts_with($key, 'experience.')));
+        // Identified survey access is granted separately by 000023, never by this broad HR grant.
+        $all = array_values(array_filter(array_keys($ids), fn ($key) => str_starts_with($key, 'experience.') && $key !== 'experience.survey.identifiable.view'));
         foreach (DB::table('roles')->get() as $role) {
             $keys = ($role->system && $role->data_scope === 'tenant') || $role->name === 'HR administrator'
                 ? $all

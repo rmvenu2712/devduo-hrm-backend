@@ -180,10 +180,18 @@ final class WorkspaceProvisioner
         'experience.survey.identifiable.view' => ['Employee Experience', 'View identifiable survey responses with audited access'],
         'experience.recognition.manage' => ['Employee Experience', 'Moderate employee recognition submissions'],
         'experience.analytics.view' => ['Employee Experience', 'View tenant-wide privacy-protected Experience service metrics'],
+        'assets.self' => ['Assets', 'View and acknowledge your assigned assets'],
+        'assets.manage' => ['Assets', 'Manage workspace inventory and custody'],
+        'expenses.self' => ['Expenses', 'Submit and view your expense claims'],
+        'expenses.approve' => ['Expenses', 'Independently approve expense claims in your employee scope'],
+        'expenses.manage' => ['Expenses', 'Configure expense policies and review claims'],
+        'expenses.payments.confirm' => ['Expenses', 'Record externally confirmed reimbursements'],
+        'travel.self' => ['Travel', 'Submit and view your travel requests'],
+        'travel.approve' => ['Travel', 'Independently approve travel within your employee scope'],
         'audit.view' => ['Administration', 'View audit history'], 'work.view' => ['My Work', 'View tasks'], 'work.manage' => ['My Work', 'Create and update tasks'],
     ];
 
-    public const MODULES = ['work', 'notifications', 'people', 'attendance', 'payroll', 'recruitment', 'leave', 'lifecycle', 'performance', 'learning', 'experience'];
+    public const MODULES = ['work', 'notifications', 'people', 'attendance', 'payroll', 'recruitment', 'leave', 'lifecycle', 'performance', 'learning', 'experience', 'assets', 'expenses', 'travel'];
 
     /** Own-data payroll keys: safe for everyone with an employee record. */
     public const PAYROLL_SELF = ['payroll.payslips.view_own', 'payroll.compensation.view_own', 'payroll.loans.view_own', 'payroll.benefits.view_own', 'payroll.benefits.enroll_own', 'payroll.tax_declaration.submit'];
@@ -193,7 +201,7 @@ final class WorkspaceProvisioner
     private const MANAGER = ['learning.self', 'learning.view', 'learning.skills.validate', 'learning.enrol.approve', 'learning.requests.approve', 'learning.reports.view', 'experience.self', 'experience.view', 'performance.self', 'performance.view', 'performance.goals.manage', 'performance.goals.approve', 'performance.reviews.manage', 'performance.reports.view', 'lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'attendance.team.view', 'attendance.approve', 'attendance.overtime.approve', 'attendance.reports.view', 'leave.view', 'leave.request', 'leave.team.view', 'leave.approve', 'leave.reports.view', 'people.changes.approve', 'people.quality.view', ...self::PAYROLL_SELF];
 
     /** HR gets everything except platform administration. */
-    private const HR_EXCLUDED = ['roles.manage', 'settings.manage', 'users.manage', 'recruitment.confidential', 'performance.feedback.reveal', 'experience.survey.identifiable.view'];
+    private const HR_EXCLUDED = ['expenses.manage', 'expenses.payments.confirm', 'roles.manage', 'settings.manage', 'users.manage', 'recruitment.confidential', 'performance.feedback.reveal', 'experience.survey.identifiable.view'];
 
     /** Payroll administration keys (everything except self-service) are never part of the default HR administrator role. */
     private static function hrExcluded(): array
@@ -217,8 +225,8 @@ final class WorkspaceProvisioner
         return [
             'Workspace administrator' => ['Full access to company administration.', 'tenant', true, array_keys(self::PERMISSIONS)],
             'HR administrator' => ['People and time-office administration across the company.', 'tenant', false, array_values(array_diff(array_keys(self::PERMISSIONS), self::hrExcluded()))],
-            'Manager' => ['Manage your direct reports: approvals and team attendance.', 'direct_reports', false, self::MANAGER],
-            'Team member' => ['Manage your own work.', 'self', false, self::MEMBER],
+            'Manager' => ['Manage your direct reports: approvals and team attendance.', 'direct_reports', false, [...self::MANAGER, 'assets.self', 'expenses.self', 'expenses.approve', 'travel.self', 'travel.approve']],
+            'Team member' => ['Manage your own work.', 'self', false, [...self::MEMBER, 'assets.self', 'expenses.self', 'travel.self']],
         ];
     }
 
