@@ -177,6 +177,8 @@ final class WorkspaceProvisioner
         'experience.knowledge.manage' => ['Employee Experience', 'Create, version and publish HR knowledge articles'],
         'experience.announcement.manage' => ['Employee Experience', 'Create and publish employee announcements'],
         'experience.survey.manage' => ['Employee Experience', 'Create surveys and view privacy-thresholded aggregate results'],
+        'experience.recognition.manage' => ['Employee Experience', 'Moderate employee recognition submissions'],
+        'experience.analytics.view' => ['Employee Experience', 'View tenant-wide privacy-protected Experience service metrics'],
         'audit.view' => ['Administration', 'View audit history'], 'work.view' => ['My Work', 'View tasks'], 'work.manage' => ['My Work', 'Create and update tasks'],
     ];
 

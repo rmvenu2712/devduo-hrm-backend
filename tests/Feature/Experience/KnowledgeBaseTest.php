@@ -40,4 +40,28 @@ class KnowledgeBaseTest extends PerformanceTestCase
         $this->getJson('/api/v1/experience/knowledge?search=leave')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.uuid', $v2['uuid']);
         $this->getJson('/api/v1/experience/knowledge/'.$v1['uuid'])->assertNotFound();
     }
+
+    public function test_knowledge_feedback_uses_small_group_suppression_and_no_individual_feedback_is_returned(): void
+    {
+        $article = $this->article();
+        $this->postJson('/api/v1/experience/knowledge/'.$article['uuid'].'/publish')->assertOk();
+        $employees = [$this->emp1, $this->emp2, $this->emp3, $this->mgr, $this->outsider];
+        foreach (array_slice($employees, 0, 1) as $employee) {
+            $this->actAs($employee);
+            $this->postJson('/api/v1/experience/knowledge/'.$article['uuid'].'/feedback', ['helpful' => true])->assertOk()->assertJsonPath('feedback_given', true);
+        }
+        $this->signIn($this->admin);
+        $this->getJson('/api/v1/experience/knowledge/'.$article['uuid'].'/feedback-results')->assertOk()->assertJsonPath('suppressed', true)->assertJsonMissingPath('response_count');
+
+        foreach (array_slice($employees, 1) as $employee) {
+            $this->actAs($employee);
+            $this->postJson('/api/v1/experience/knowledge/'.$article['uuid'].'/feedback', ['helpful' => false])->assertOk();
+        }
+        $this->signIn($this->admin);
+        $results = $this->getJson('/api/v1/experience/knowledge/'.$article['uuid'].'/feedback-results')->assertOk()->assertJsonPath('response_count', 5)->json();
+        $this->assertNull($results['helpful']);
+        $this->assertNull($results['not_helpful']);
+        $this->assertTrue($results['helpful_suppressed']);
+        $this->assertTrue($results['not_helpful_suppressed']);
+    }
 }

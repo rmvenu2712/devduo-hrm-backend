@@ -6,7 +6,10 @@ use App\Domain\Access\DataScope;
 use App\Domain\Experience\{HelpdeskService, KnowledgeService};
 use App\Domain\Experience\Models\{KnowledgeArticle, ServiceCategory, Ticket};
 use App\Domain\People\Models\Employee;
+use App\Domain\Leave\Accrual\Actors;
+use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 
 final class HelpdeskController
@@ -23,6 +26,14 @@ final class HelpdeskController
         return $this->helpdesk->categories()->map(fn ($c) => ['uuid' => $c->uuid, 'code' => $c->code, 'name' => $c->name, 'description' => $c->description]);
     }
 
+    public function health() { return $this->helpdesk->health(); }
+
+    public function assignees()
+    {
+        return User::whereIn('id', Actors::usersWithPermission('experience.ticket.manage'))->where('active', true)
+            ->orderBy('name')->get(['id', 'name'])->map(fn ($u) => ['id' => $u->id, 'name' => $u->name])->values();
+    }
+
     public function createCategory(Request $r)
     {
         $d = $r->validate(['code' => ['required', 'string', 'max:40', Rule::unique('experience_service_categories', 'code')->where('tenant_id', $r->user()->tenant_id)], 'name' => 'required|string|max:120', 'description' => 'nullable|string|max:2000', 'target_hours' => 'nullable|integer|min:1|max:8760']);
@@ -35,12 +46,32 @@ final class HelpdeskController
         $q = $this->helpdesk->visibleTickets($r->user())->with('category')->latest('id');
         if ($r->filled('status')) $q->where('status', $r->query('status'));
         if ($r->filled('category_uuid')) $q->whereIn('category_id', ServiceCategory::where('uuid', $r->query('category_uuid'))->select('id'));
+        if ($r->filled('priority')) $q->where('priority', $r->query('priority'));
+        if ($r->query('assignee') === 'unassigned') $q->whereNull('assignee_id');
+        elseif ($r->filled('assignee') && ctype_digit((string) $r->query('assignee'))) $q->where('assignee_id', (int) $r->query('assignee'));
+        if ($r->boolean('sla_overdue')) $q->whereIn('status', ['open', 'in_progress', 'waiting_employee'])->whereNotNull('sla_due_at')->where('sla_due_at', '<=', now());
         return $q->paginate(min(100, max(1, (int) $r->query('per_page', 25))))->through(fn ($ticket) => $this->helpdesk->present($ticket, $r->user()));
     }
 
     public function show(Request $r, string $uuid)
     {
         return $this->helpdesk->present($this->find($r, $uuid), $r->user());
+    }
+
+    public function attachment(Request $r, string $uuid, string $attachment)
+    {
+        $ticket = $this->find($r, $uuid);
+        $file = $this->helpdesk->attachment($ticket, $attachment);
+        abort_unless(Storage::disk('experience_private')->exists($file->path), 404);
+        return Storage::disk('experience_private')->download($file->path, $file->filename, ['X-Content-Type-Options' => 'nosniff', 'Cache-Control' => 'private, no-store']);
+    }
+
+    public function addAttachment(Request $r, string $uuid)
+    {
+        $data = $r->validate(['file' => 'required|file|mimes:pdf,png,jpg,jpeg,doc,docx,xlsx|max:5120']);
+        $ticket = $this->find($r, $uuid);
+        $attachment = $this->helpdesk->addAttachment($r->user(), $ticket, $data['file']);
+        return response()->json(['uuid' => $attachment->uuid, 'filename' => $attachment->filename, 'mime_type' => $attachment->mime_type, 'size_bytes' => $attachment->size_bytes], 201);
     }
 
     public function store(Request $r)
@@ -67,6 +98,27 @@ final class HelpdeskController
         return $this->helpdesk->present($this->helpdesk->update($r->user(), $this->find($r, $uuid), $d), $r->user());
     }
 
+    public function reopen(Request $r, string $uuid)
+    {
+        return $this->helpdesk->present($this->helpdesk->reopenOwn($r->user(), $this->find($r, $uuid)), $r->user());
+    }
+
+    public function feedback(Request $r, string $uuid)
+    {
+        $d = $r->validate(['rating' => 'required|integer|between:1,5', 'comment' => 'nullable|string|max:1000']);
+        $ticket = $this->find($r, $uuid);
+        $this->helpdesk->feedback($r->user(), $ticket, $d['rating'], $d['comment'] ?? null);
+        return $this->helpdesk->present($ticket->refresh(), $r->user());
+    }
+
+    public function escalate(Request $r, string $uuid)
+    {
+        $d = $r->validate(['reason' => 'required|string|max:1000']);
+        $ticket = $this->find($r, $uuid);
+        $this->helpdesk->escalate($r->user(), $ticket, $d['reason']);
+        return $this->helpdesk->present($ticket->refresh(), $r->user());
+    }
+
     public function knowledgeIndex(Request $r)
     {
         $q = $this->knowledge->visible($r->user());
@@ -76,12 +128,12 @@ final class HelpdeskController
             if ($term !== '') $q->where(fn ($q) => $q->where('title', 'like', '%'.$term.'%')->orWhere('summary', 'like', '%'.$term.'%')->orWhere('body', 'like', '%'.$term.'%'));
         }
         return $q->orderByDesc('effective_from')->orderBy('title')->paginate(min(50, max(1, (int) $r->query('per_page', 20))))
-            ->through(fn ($article) => $this->knowledge->present($article));
+            ->through(fn ($article) => $this->knowledge->present($article, $r->user()));
     }
 
     public function knowledgeShow(Request $r, string $uuid)
     {
-        return $this->knowledge->present($this->knowledge->visible($r->user())->where('uuid', $uuid)->firstOrFail());
+        return $this->knowledge->present($this->knowledge->visible($r->user())->where('uuid', $uuid)->firstOrFail(), $r->user());
     }
 
     public function knowledgeCreate(Request $r)
@@ -96,5 +148,19 @@ final class HelpdeskController
     {
         $article = KnowledgeArticle::where('uuid', $uuid)->firstOrFail();
         return $this->knowledge->present($this->knowledge->publish($article, $r->user()));
+    }
+
+    public function knowledgeFeedback(Request $r, string $uuid)
+    {
+        $d = $r->validate(['helpful' => 'required|boolean']);
+        $article = $this->knowledge->visible($r->user())->where('uuid', $uuid)->firstOrFail();
+        $this->knowledge->feedback($article, $r->user(), $d['helpful']);
+        return $this->knowledge->present($article, $r->user());
+    }
+
+    public function knowledgeFeedbackResults(Request $r, string $uuid)
+    {
+        $article = KnowledgeArticle::where('uuid', $uuid)->firstOrFail();
+        return $this->knowledge->feedbackResults($article);
     }
 }

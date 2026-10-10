@@ -12,7 +12,7 @@ final class AnnouncementController
 
     public function index(Request $r)
     {
-        return $this->announcements->visible($r->user())->orderByDesc('publish_at')->orderByDesc('id')
+        return $this->announcements->visible($r->user())->orderByDesc('pinned')->orderByDesc('publish_at')->orderByDesc('id')
             ->paginate(min(50, max(1, (int) $r->query('per_page', 20))))
             ->through(fn ($announcement) => $this->announcements->present($announcement, $r->user()));
     }
@@ -20,9 +20,14 @@ final class AnnouncementController
     public function create(Request $r)
     {
         $data = $r->validate(['title' => 'required|string|max:200', 'body' => 'required|string|max:50000',
-            'acknowledgment_required' => 'sometimes|boolean', 'publish_at' => 'nullable|date_format:Y-m-d']);
+            'acknowledgment_required' => 'sometimes|boolean', 'pinned' => 'sometimes|boolean', 'publish_at' => 'nullable|date_format:Y-m-d', 'expires_at' => 'nullable|date_format:Y-m-d',
+            'audience' => 'sometimes|array:legal_entity_ids,location_ids,designation_ids', 'audience.legal_entity_ids' => 'sometimes|array|max:50', 'audience.legal_entity_ids.*' => 'required|integer|min:1|distinct',
+            'audience.location_ids' => 'sometimes|array|max:50', 'audience.location_ids.*' => 'required|integer|min:1|distinct',
+            'audience.designation_ids' => 'sometimes|array|max:50', 'audience.designation_ids.*' => 'required|integer|min:1|distinct']);
         return response()->json($this->announcements->present($this->announcements->create($r->user(), $data), $r->user()), 201);
     }
+
+    public function audienceOptions() { return $this->announcements->audienceOptions(); }
 
     public function publish(Request $r, string $uuid)
     {
@@ -43,5 +48,10 @@ final class AnnouncementController
         abort_unless($announcement->status === 'published', 404);
         $this->announcements->record($r->user(), $announcement, true);
         return $this->announcements->present($announcement, $r->user());
+    }
+
+    public function metrics(Request $r, string $uuid)
+    {
+        return $this->announcements->metrics(Announcement::where('uuid', $uuid)->firstOrFail());
     }
 }

@@ -3,7 +3,7 @@
 namespace App\Domain\Experience;
 
 use App\Domain\Audit\Audit;
-use App\Domain\Experience\Models\KnowledgeArticle;
+use App\Domain\Experience\Models\{KnowledgeArticle, KnowledgeFeedback};
 use App\Domain\Tenancy\TenantClock;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
@@ -29,11 +29,27 @@ final class KnowledgeService
             });
     }
 
-    public function present(KnowledgeArticle $article): array
+    public function present(KnowledgeArticle $article, ?User $viewer = null): array
     {
         return ['uuid' => $article->uuid, 'article_key' => $article->article_key, 'version' => $article->version, 'locale' => $article->locale,
             'title' => $article->title, 'summary' => $article->summary, 'body' => $article->body, 'visibility' => $article->visibility,
-            'status' => $article->status, 'effective_from' => $article->effective_from?->format('Y-m-d'), 'effective_until' => $article->effective_until?->format('Y-m-d')];
+            'status' => $article->status, 'effective_from' => $article->effective_from?->format('Y-m-d'), 'effective_until' => $article->effective_until?->format('Y-m-d'),
+            'feedback_given' => $viewer ? KnowledgeFeedback::where('article_id', $article->id)->where('user_id', $viewer->id)->exists() : false];
+    }
+
+    public function feedback(KnowledgeArticle $article, User $viewer, bool $helpful): void
+    {
+        KnowledgeFeedback::updateOrCreate(['article_id' => $article->id, 'user_id' => $viewer->id], ['uuid' => (string) Str::uuid(), 'helpful' => $helpful]);
+    }
+
+    public function feedbackResults(KnowledgeArticle $article): array
+    {
+        $counts = KnowledgeFeedback::where('article_id', $article->id)->select('helpful', DB::raw('COUNT(*) as total'))->groupBy('helpful')->pluck('total', 'helpful');
+        $total = (int) $counts->sum();
+        if ($total < 5) return ['suppressed' => true, 'minimum_responses' => 5];
+        return ['suppressed' => false, 'response_count' => $total, 'helpful' => (int) ($counts[1] ?? $counts[true] ?? 0) >= 5 ? (int) ($counts[1] ?? $counts[true]) : null,
+            'not_helpful' => (int) ($counts[0] ?? $counts[false] ?? 0) >= 5 ? (int) ($counts[0] ?? $counts[false]) : null,
+            'helpful_suppressed' => (int) ($counts[1] ?? $counts[true] ?? 0) < 5, 'not_helpful_suppressed' => (int) ($counts[0] ?? $counts[false] ?? 0) < 5];
     }
 
     public function create(User $actor, array $data): KnowledgeArticle

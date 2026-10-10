@@ -38,4 +38,22 @@ class AnnouncementsTest extends PerformanceTestCase
         $this->actAs($this->emp1);
         $this->postJson('/api/v1/experience/announcements/'.$created['uuid'].'/acknowledge')->assertUnprocessable();
     }
+
+    public function test_announcement_audience_expiry_and_small_audience_metrics_are_enforced(): void
+    {
+        $london = $this->hire('Lina London', ['location' => 1, 'role' => 'Team member']);
+        $announcement = $this->postJson('/api/v1/experience/announcements', ['title' => 'London office update', 'body' => 'A local update.',
+            'pinned' => true, 'expires_at' => now()->format('Y-m-d'), 'audience' => ['location_ids' => [$this->org['location'][1]]]])->assertCreated()->json();
+        $this->postJson('/api/v1/experience/announcements/'.$announcement['uuid'].'/publish')->assertOk();
+
+        $this->actAs($this->emp1);
+        $this->getJson('/api/v1/experience/announcements')->assertOk()->assertJsonCount(0, 'data');
+        $this->actAs($london);
+        $this->getJson('/api/v1/experience/announcements')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.pinned', true);
+        $this->travelTo(now()->addDays(1));
+        $this->getJson('/api/v1/experience/announcements')->assertOk()->assertJsonCount(0, 'data');
+
+        $this->signIn($this->admin);
+        $this->getJson('/api/v1/experience/announcements/'.$announcement['uuid'].'/metrics')->assertOk()->assertJsonPath('suppressed', true)->assertJsonMissingPath('audience_count');
+    }
 }

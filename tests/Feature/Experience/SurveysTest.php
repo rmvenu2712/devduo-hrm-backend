@@ -3,14 +3,16 @@
 namespace Tests\Feature\Experience;
 
 use App\Domain\Experience\Models\Survey;
+use App\Domain\Experience\SurveyService;
+use App\Domain\Tenancy\TenantRunner;
 use Tests\Feature\Performance\PerformanceTestCase;
 
 class SurveysTest extends PerformanceTestCase
 {
-    private function createSurvey(): array
+    private function createSurvey(array $extra = []): array
     {
-        return $this->postJson('/api/v1/experience/surveys', ['title' => 'Team pulse', 'description' => 'A short anonymous check-in.',
-            'minimum_responses' => 5, 'questions' => [['prompt' => 'Is workload manageable?']]])->assertCreated()->json();
+        return $this->postJson('/api/v1/experience/surveys', array_replace(['title' => 'Team pulse', 'description' => 'A short anonymous check-in.',
+            'minimum_responses' => 5, 'retention_until' => now()->addMonths(6)->format('Y-m-d'), 'questions' => [['prompt' => 'Is workload manageable?']]], $extra))->assertCreated()->json();
     }
 
     public function test_anonymous_survey_suppresses_small_groups_and_only_exposes_aggregates(): void
@@ -48,8 +50,44 @@ class SurveysTest extends PerformanceTestCase
     {
         $survey = $this->createSurvey();
         $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/publish')->assertOk();
+        $this->signIn($this->admin);
+        $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/responses', ['answers' => [$survey['questions'][0]['uuid'] => 4]])->assertForbidden();
         $this->actAs($this->emp1);
         $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/responses', ['answers' => []])->assertUnprocessable();
         $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/responses', ['answers' => [$survey['questions'][0]['uuid'] => 6]])->assertUnprocessable();
+    }
+
+    public function test_campaign_eligibility_and_explicit_consent_are_enforced(): void
+    {
+        $londonEmployee = $this->hire('Lina London', ['location' => 1, 'role' => 'Team member']);
+        $survey = $this->createSurvey(['campaign_type' => 'onboarding', 'requires_consent' => true,
+            'eligibility' => ['location_ids' => [$this->org['location'][1]]]]) + [];
+        $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/publish')->assertOk();
+        $this->actAs($this->emp1);
+        $this->getJson('/api/v1/experience/surveys')->assertOk()->assertJsonCount(0, 'data');
+        $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/responses', ['answers' => [$survey['questions'][0]['uuid'] => 4], 'consent' => true])->assertNotFound();
+
+        $this->actAs($londonEmployee);
+        $this->getJson('/api/v1/experience/surveys')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.campaign_type', 'onboarding');
+        $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/responses', ['answers' => [$survey['questions'][0]['uuid'] => 4]])->assertUnprocessable();
+        $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/responses', ['answers' => [$survey['questions'][0]['uuid'] => 4], 'consent' => true])->assertOk();
+        $surveyId = \DB::table('experience_surveys')->where('uuid', $survey['uuid'])->value('id');
+        $this->assertDatabaseHas('experience_survey_participants', ['survey_id' => $surveyId, 'consented' => true]);
+    }
+
+    public function test_survey_results_expire_and_scheduled_retention_purges_data(): void
+    {
+        $survey = $this->createSurvey(['retention_until' => now()->addDays(2)->format('Y-m-d')]);
+        $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/publish')->assertOk();
+        $this->actAs($this->emp1);
+        $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/responses', ['answers' => [$survey['questions'][0]['uuid'] => 4]])->assertOk();
+        $surveyId = \DB::table('experience_surveys')->where('uuid', $survey['uuid'])->value('id');
+        \DB::table('experience_surveys')->where('id', $surveyId)->update(['retention_until' => now()->subDay()->toDateString()]);
+        $this->signIn($this->admin);
+        $this->getJson('/api/v1/experience/surveys/'.$survey['uuid'].'/results')->assertOk()->assertJsonPath('retention_expired', true);
+        $purged = app(TenantRunner::class)->run($this->admin->tenant_id, fn () => app(SurveyService::class)->purgeExpiredData());
+        $this->assertSame(1, $purged);
+        $this->assertDatabaseMissing('experience_survey_answer_counts', ['survey_id' => $surveyId]);
+        $this->assertDatabaseMissing('experience_survey_participants', ['survey_id' => $surveyId]);
     }
 }
