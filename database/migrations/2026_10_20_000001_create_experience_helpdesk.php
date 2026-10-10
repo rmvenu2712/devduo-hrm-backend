@@ -20,7 +20,7 @@ return new class extends Migration
             $t->unsignedBigInteger('employee_id')->index(); $t->unsignedBigInteger('category_id')->index(); $t->unsignedBigInteger('requester_id');
             $t->unsignedBigInteger('assignee_id')->nullable()->index(); $t->string('subject', 200); $t->text('description');
             $t->string('priority', 16)->default('normal'); $t->string('status', 24)->default('open'); $t->string('resolution', 1000)->nullable();
-            $t->dateTime('first_response_at')->nullable(); $t->dateTime('resolved_at')->nullable(); $t->dateTime('closed_at')->nullable(); $t->timestamps();
+            $t->dateTime('sla_due_at')->nullable(); $t->dateTime('first_response_at')->nullable(); $t->dateTime('resolved_at')->nullable(); $t->dateTime('closed_at')->nullable(); $t->timestamps();
             $t->index(['tenant_id', 'status', 'created_at']);
         });
         Schema::create('experience_ticket_comments', function (Blueprint $t) {
