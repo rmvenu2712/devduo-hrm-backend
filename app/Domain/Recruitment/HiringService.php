@@ -1,0 +1,70 @@
+<?php
+
+namespace App\Domain\Recruitment;
+
+use App\Domain\Audit\Audit;
+use App\Domain\Recruitment\Models\{Requisition, Candidate, Application, ApplicationAction};
+use App\Domain\Work\TaskService;
+use App\Models\User;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
+
+final class HiringService
+{
+    public const STAGES = ['applied', 'screening', 'assessment', 'interview', 'offer'];
+
+    public function decide(User $actor, string $uuid, string $decision): Requisition
+    {
+        abort_unless($actor->allows('recruitment.approve'), 403);
+        return DB::transaction(function () use ($actor, $uuid, $decision) {
+            $record = app(HiringScope::class)->requisitions($actor, 'recruitment.approve')->where('uuid', $uuid)->lockForUpdate()->firstOrFail();
+            abort_if($record->created_by === $actor->id, 403, 'A different authorized person must approve the requisition.');
+            abort_unless($record->status === 'pending', 409, 'This requisition has already been reviewed.');
+            $record->update(['status' => $decision, 'approved_by' => $actor->id, 'opened_at' => $decision === 'open' ? now() : null]);
+            if ($decision === 'open') RecruitmentNotify::tell($record->recruiter_id, 'Requisition approved', 'A hiring requisition is open for sourcing.');
+            if ($decision === 'open') app(TaskService::class)->createOnce(['title' => 'Source candidates for an open requisition', 'description' => 'The requisition was approved. Publish a posting and add candidates.', 'assignee_id' => $record->recruiter_id, 'source_module' => 'recruitment', 'source_entity' => 'sourcing:'.$record->uuid, 'action' => '/recruitment', 'status' => 'open', 'priority' => 'normal']);
+            app(TaskService::class)->completeBySource('recruitment', 'requisition:'.$record->uuid);
+            Audit::record('requisition.'.$decision, 'recruitment', $record->uuid);
+            return $record;
+        });
+    }
+
+    public function apply(User $actor, array $data): Application
+    {
+        abort_unless($actor->allows('recruitment.manage'), 403);
+        return DB::transaction(function () use ($actor, $data) {
+            $requisition = app(HiringScope::class)->requisitions($actor, 'recruitment.manage')->where('uuid', $data['requisition_uuid'])->lockForUpdate()->firstOrFail();
+            abort_unless($requisition->status === 'open', 422, 'Applications require an approved, open requisition.');
+            $candidate = app(HiringScope::class)->candidates($actor, 'recruitment.manage')->where('uuid', $data['candidate_uuid'])->firstOrFail();
+            if ($candidate->retention_until < now('UTC')->toDateString()) throw ValidationException::withMessages(['candidate_uuid' => 'Candidate retention period has expired; review privacy requirements before reuse.']);
+            $existing = Application::where('candidate_id', $candidate->id)->where('requisition_id', $requisition->id)->first();
+            if ($existing) return $existing;
+            $record = Application::create(['candidate_id' => $candidate->id, 'requisition_id' => $requisition->id, 'stage' => 'applied', 'status' => 'active', 'source' => $data['source'], 'stage_entered_at' => now()]);
+            ApplicationAction::create(['application_id' => $record->id, 'actor_id' => $actor->id, 'from_stage' => null, 'to_stage' => 'applied', 'status' => 'active', 'reason' => 'Application recorded', 'idempotency_key' => (string) \Illuminate\Support\Str::uuid()]);
+            Audit::record('application.created', 'recruitment', $record->uuid);
+            return $record;
+        });
+    }
+
+    public function transition(User $actor, string $uuid, array $data): Application
+    {
+        abort_unless($actor->allows('recruitment.manage'), 403);
+        return DB::transaction(function () use ($actor, $uuid, $data) {
+            $record = app(HiringScope::class)->applications($actor, 'recruitment.manage')->where('uuid', $uuid)->lockForUpdate()->firstOrFail();
+            $retry = ApplicationAction::where('idempotency_key', $data['idempotency_key'])->first();
+            if ($retry) {
+                abort_unless($retry->application_id === $record->id && $retry->actor_id === $actor->id && $retry->to_stage === $data['stage'] && $retry->status === $data['status'] && $retry->reason === $data['reason'], 409, 'Request key belongs to a different transition.');
+                return $record;
+            }
+            abort_unless($record->status === 'active', 409, 'Closed applications cannot be moved.');
+            abort_unless($record->stage === $data['expected_stage'], 409, 'Application changed; refresh before moving it.');
+            $current = array_search($record->stage, self::STAGES, true); $next = array_search($data['stage'], self::STAGES, true);
+            if ($data['status'] === 'active' && $next !== $current + 1) throw ValidationException::withMessages(['stage' => 'Move to the next stage. Hiring requires the separate offer and employee-conversion workflow.']);
+            if ($data['status'] !== 'active' && $data['stage'] !== $record->stage) throw ValidationException::withMessages(['stage' => 'Closing an application preserves its final stage.']);
+            ApplicationAction::create(['application_id' => $record->id, 'actor_id' => $actor->id, 'from_stage' => $record->stage, 'to_stage' => $data['stage'], 'status' => $data['status'], 'reason' => $data['reason'], 'idempotency_key' => $data['idempotency_key']]);
+            $record->update(['stage' => $data['stage'], 'status' => $data['status'], 'stage_entered_at' => now(), 'closed_at' => $data['status'] === 'active' ? null : now()]);
+            Audit::record('application.transitioned', 'recruitment', $record->uuid, ['stage' => $record->stage, 'status' => $record->status]);
+            return $record;
+        });
+    }
+}
