@@ -39,6 +39,7 @@ class OffboardingTest extends TestCase
 
     private function leaver(): array
     {
+        $this->context($this->admin->tenant_id);
         $emp = $this->hire('Lena Leaver', ['role' => 'Team member', 'email' => 'lena@alpha.test']);
         $this->context($this->admin->tenant_id);
         app(SeparationService::class)->initiate($this->admin, $emp, ['type' => 'resignation', 'last_working_date' => '2026-10-20']);
@@ -59,6 +60,7 @@ class OffboardingTest extends TestCase
         $this->getJson('/api/v1/lifecycle/cases/'.$case->uuid.'/clearance')->assertOk()->assertJsonPath('cleared', false)->assertJsonCount(2, 'blockers');
         $this->postJson('/api/v1/lifecycle/cases/'.$case->uuid.'/settlement', ['currency' => 'inr'])->assertConflict()->assertJsonPath('code', 'clearance_pending')->assertJsonCount(2, 'blockers');
 
+        $this->context($this->admin->tenant_id);
         $tasks = LifecycleTask::where('case_id', $case->id)->get()->keyBy('title');
         $this->signIn($this->checker);
         $this->postJson('/api/v1/lifecycle/tasks/'.$tasks['Return laptop']->uuid.'/complete')->assertOk();
@@ -100,6 +102,7 @@ class OffboardingTest extends TestCase
         $this->assertDatabaseHas('audit_logs', ['action' => 'exit_interview.read', 'resource' => $case->uuid]);
         $this->getJson('/api/v1/lifecycle/cases/'.$case->uuid)->assertOk()->assertJsonMissingPath('answers'); // case detail never carries answers
 
+        $this->context($this->admin->tenant_id);
         $hr = $this->userWithRole('HR administrator', 'hr@alpha.test');
         $this->signIn($hr)->getJson('/api/v1/lifecycle/cases/'.$case->uuid.'/exit-interview')->assertOk();
 

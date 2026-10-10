@@ -12,6 +12,6 @@ class Checkin extends TenantRecord
 
     protected function casts(): array
     {
-        return [];
+        return ['value' => 'decimal:4', 'progress_before' => 'decimal:2', 'progress_after' => 'decimal:2'];
     }
 }

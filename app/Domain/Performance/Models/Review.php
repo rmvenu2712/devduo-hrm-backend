@@ -28,7 +28,7 @@ class Review extends TenantRecord
 
     protected function casts(): array
     {
-        return ['trace' => 'array', 'snapshot' => 'array', 'finalized_at' => 'datetime', 'acknowledged_at' => 'datetime'];
+        return ['computed_score' => 'decimal:3', 'final_score' => 'decimal:3', 'trace' => 'array', 'snapshot' => 'array', 'finalized_at' => 'datetime', 'acknowledged_at' => 'datetime'];
     }
     public function cycle() { return $this->belongsTo(Cycle::class, 'cycle_id'); }
     public function responses() { return $this->hasMany(Response::class, 'review_id'); }

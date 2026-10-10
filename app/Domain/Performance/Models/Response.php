@@ -21,7 +21,7 @@ class Response extends TenantRecord
 
     protected function casts(): array
     {
-        return ['due_on' => 'date:Y-m-d', 'submitted_at' => 'datetime', 'reminded_at' => 'datetime'];
+        return ['score' => 'decimal:3', 'due_on' => 'date:Y-m-d', 'submitted_at' => 'datetime', 'reminded_at' => 'datetime'];
     }
     public function items() { return $this->hasMany(Item::class, 'response_id'); }
 }

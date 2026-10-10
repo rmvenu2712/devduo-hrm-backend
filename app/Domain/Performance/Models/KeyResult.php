@@ -12,6 +12,6 @@ class KeyResult extends TenantRecord
 
     protected function casts(): array
     {
-        return [];
+        return ['weight' => 'decimal:2', 'progress' => 'decimal:2', 'start_value' => 'decimal:4', 'target_value' => 'decimal:4', 'current_value' => 'decimal:4'];
     }
 }

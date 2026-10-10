@@ -12,6 +12,6 @@ class CalibrationChange extends TenantRecord
 
     protected function casts(): array
     {
-        return ['decided_at' => 'datetime'];
+        return ['from_score' => 'decimal:3', 'to_score' => 'decimal:3', 'decided_at' => 'datetime'];
     }
 }

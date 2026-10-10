@@ -22,6 +22,6 @@ class Item extends TenantRecord
 
     protected function casts(): array
     {
-        return [];
+        return ['weight' => 'decimal:2', 'rating' => 'decimal:2'];
     }
 }

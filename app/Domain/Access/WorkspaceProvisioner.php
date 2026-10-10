@@ -158,17 +158,28 @@ final class WorkspaceProvisioner
         'performance.reports.view' => ['Performance', 'View performance dashboards and distributions'],
         'performance.outcomes.view' => ['Performance', 'Read finalized review outcomes (compensation and promotion inputs)'],
         'performance.feedback.reveal' => ['Performance', 'Reveal anonymous feedback authors'],
+        'learning.self' => ['Learning', 'Own skills, courses, enrolments, certifications and training requests'],
+        'learning.view' => ['Learning', 'View learning, skills and compliance of people in your data scope'],
+        'learning.skills.manage' => ['Learning', 'Manage the skills taxonomy and role skill requirements'],
+        'learning.skills.validate' => ['Learning', 'Validate or assess skill levels of people in scope'],
+        'learning.catalog.manage' => ['Learning', 'Manage courses, paths, sessions, assessments and certifications'],
+        'learning.enrol.manage' => ['Learning', 'Enrol people, mark attendance and record completion'],
+        'learning.enrol.approve' => ['Learning', 'Approve or reject enrolments for people in scope'],
+        'learning.assign.manage' => ['Learning', 'Manage mandatory training rules and assignments'],
+        'learning.requests.approve' => ['Learning', 'Approve training requests and manage learning budgets'],
+        'learning.reports.view' => ['Learning', 'View learning dashboards and cost reports'],
+        'learning.reports.export' => ['Learning', 'Export learning reports'],
         'audit.view' => ['Administration', 'View audit history'], 'work.view' => ['My Work', 'View tasks'], 'work.manage' => ['My Work', 'Create and update tasks'],
     ];
 
-    public const MODULES = ['work', 'notifications', 'people', 'attendance', 'payroll', 'recruitment', 'leave', 'lifecycle', 'performance'];
+    public const MODULES = ['work', 'notifications', 'people', 'attendance', 'payroll', 'recruitment', 'leave', 'lifecycle', 'performance', 'learning'];
 
     /** Own-data payroll keys: safe for everyone with an employee record. */
     public const PAYROLL_SELF = ['payroll.payslips.view_own', 'payroll.compensation.view_own', 'payroll.loans.view_own', 'payroll.benefits.view_own', 'payroll.benefits.enroll_own', 'payroll.tax_declaration.submit'];
 
-    private const MEMBER = ['performance.self', 'lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'leave.view', 'leave.request', ...self::PAYROLL_SELF];
+    private const MEMBER = ['learning.self', 'performance.self', 'lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'leave.view', 'leave.request', ...self::PAYROLL_SELF];
 
-    private const MANAGER = ['performance.self', 'performance.view', 'performance.goals.manage', 'performance.goals.approve', 'performance.reviews.manage', 'performance.reports.view', 'lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'attendance.team.view', 'attendance.approve', 'attendance.overtime.approve', 'attendance.reports.view', 'leave.view', 'leave.request', 'leave.team.view', 'leave.approve', 'leave.reports.view', 'people.changes.approve', 'people.quality.view', ...self::PAYROLL_SELF];
+    private const MANAGER = ['learning.self', 'learning.view', 'learning.skills.validate', 'learning.enrol.approve', 'learning.requests.approve', 'learning.reports.view', 'performance.self', 'performance.view', 'performance.goals.manage', 'performance.goals.approve', 'performance.reviews.manage', 'performance.reports.view', 'lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'attendance.team.view', 'attendance.approve', 'attendance.overtime.approve', 'attendance.reports.view', 'leave.view', 'leave.request', 'leave.team.view', 'leave.approve', 'leave.reports.view', 'people.changes.approve', 'people.quality.view', ...self::PAYROLL_SELF];
 
     /** HR gets everything except platform administration. */
     private const HR_EXCLUDED = ['roles.manage', 'settings.manage', 'users.manage', 'recruitment.confidential', 'performance.feedback.reveal'];

@@ -50,6 +50,7 @@ class LifecycleSecurityTest extends TestCase
         $theirs = $this->postJson('/api/v1/lifecycle/cases', ['employee_uuid' => $other->uuid, 'kind' => 'onboarding', 'anchor_date' => '2026-10-07'])->json('uuid');
         $own = $this->postJson('/api/v1/lifecycle/cases', ['employee_uuid' => $mine->uuid, 'kind' => 'onboarding', 'anchor_date' => '2026-10-07'])->json('uuid');
 
+        $this->context($this->admin->tenant_id);
         // A scoped HR-style role (direct reports) sees only their team.
         $role = \App\Models\Role::create(['name' => 'Team lifecycle', 'description' => 'x', 'data_scope' => 'direct_reports', 'system' => false]);
         $role->permissions()->sync(\App\Models\Permission::whereIn('key', ['lifecycle.view', 'lifecycle.manage', 'lifecycle.moves.manage'])->pluck('id'));
