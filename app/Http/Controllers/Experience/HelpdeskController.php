@@ -3,15 +3,15 @@
 namespace App\Http\Controllers\Experience;
 
 use App\Domain\Access\DataScope;
-use App\Domain\Experience\HelpdeskService;
-use App\Domain\Experience\Models\{ServiceCategory, Ticket};
+use App\Domain\Experience\{HelpdeskService, KnowledgeService};
+use App\Domain\Experience\Models\{KnowledgeArticle, ServiceCategory, Ticket};
 use App\Domain\People\Models\Employee;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
 final class HelpdeskController
 {
-    public function __construct(private HelpdeskService $helpdesk, private DataScope $scope) {}
+    public function __construct(private HelpdeskService $helpdesk, private KnowledgeService $knowledge, private DataScope $scope) {}
 
     private function find(Request $r, string $uuid): Ticket
     {
@@ -65,5 +65,36 @@ final class HelpdeskController
         $d = $r->validate(['status' => ['sometimes', Rule::in(['in_progress', 'waiting_employee', 'resolved', 'closed'])],
             'priority' => ['sometimes', Rule::in(['low', 'normal', 'high', 'urgent'])], 'assignee_id' => 'sometimes|nullable|integer', 'resolution' => 'sometimes|nullable|string|max:1000']);
         return $this->helpdesk->present($this->helpdesk->update($r->user(), $this->find($r, $uuid), $d), $r->user());
+    }
+
+    public function knowledgeIndex(Request $r)
+    {
+        $q = $this->knowledge->visible($r->user());
+        if ($r->filled('locale')) $q->where('locale', $r->query('locale'));
+        if ($r->filled('search')) {
+            $term = trim(str_replace(['%', '_'], '', (string) $r->query('search')));
+            if ($term !== '') $q->where(fn ($q) => $q->where('title', 'like', '%'.$term.'%')->orWhere('summary', 'like', '%'.$term.'%')->orWhere('body', 'like', '%'.$term.'%'));
+        }
+        return $q->orderByDesc('effective_from')->orderBy('title')->paginate(min(50, max(1, (int) $r->query('per_page', 20))))
+            ->through(fn ($article) => $this->knowledge->present($article));
+    }
+
+    public function knowledgeShow(Request $r, string $uuid)
+    {
+        return $this->knowledge->present($this->knowledge->visible($r->user())->where('uuid', $uuid)->firstOrFail());
+    }
+
+    public function knowledgeCreate(Request $r)
+    {
+        $d = $r->validate(['article_key' => 'nullable|string|max:180', 'locale' => ['required', 'string', 'max:12', 'regex:/^[a-z]{2,3}(?:-[A-Z]{2})?$/'],
+            'title' => 'required|string|max:200', 'summary' => 'nullable|string|max:500', 'body' => 'required|string|max:50000',
+            'visibility' => ['sometimes', Rule::in(['employee', 'hr'])], 'effective_from' => 'nullable|date_format:Y-m-d', 'effective_until' => 'nullable|date_format:Y-m-d']);
+        return response()->json($this->knowledge->present($this->knowledge->create($r->user(), $d)), 201);
+    }
+
+    public function knowledgePublish(Request $r, string $uuid)
+    {
+        $article = KnowledgeArticle::where('uuid', $uuid)->firstOrFail();
+        return $this->knowledge->present($this->knowledge->publish($article, $r->user()));
     }
 }

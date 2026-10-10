@@ -174,6 +174,9 @@ final class WorkspaceProvisioner
         'experience.ticket.manage' => ['Employee Experience', 'Manage HR service tickets and view private notes'],
         'experience.ticket.assign' => ['Employee Experience', 'Assign HR service tickets within the workspace'],
         'experience.category.manage' => ['Employee Experience', 'Manage HR service catalog categories'],
+        'experience.knowledge.manage' => ['Employee Experience', 'Create, version and publish HR knowledge articles'],
+        'experience.announcement.manage' => ['Employee Experience', 'Create and publish employee announcements'],
+        'experience.survey.manage' => ['Employee Experience', 'Create surveys and view privacy-thresholded aggregate results'],
         'audit.view' => ['Administration', 'View audit history'], 'work.view' => ['My Work', 'View tasks'], 'work.manage' => ['My Work', 'Create and update tasks'],
     ];
 
