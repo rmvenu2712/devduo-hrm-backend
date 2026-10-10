@@ -169,17 +169,22 @@ final class WorkspaceProvisioner
         'learning.requests.approve' => ['Learning', 'Approve training requests and manage learning budgets'],
         'learning.reports.view' => ['Learning', 'View learning dashboards and cost reports'],
         'learning.reports.export' => ['Learning', 'Export learning reports'],
+        'experience.self' => ['Employee Experience', 'Create and view own HR service tickets and employee communications'],
+        'experience.view' => ['Employee Experience', 'View tickets within assigned employee data scope'],
+        'experience.ticket.manage' => ['Employee Experience', 'Manage HR service tickets and view private notes'],
+        'experience.ticket.assign' => ['Employee Experience', 'Assign HR service tickets within the workspace'],
+        'experience.category.manage' => ['Employee Experience', 'Manage HR service catalog categories'],
         'audit.view' => ['Administration', 'View audit history'], 'work.view' => ['My Work', 'View tasks'], 'work.manage' => ['My Work', 'Create and update tasks'],
     ];
 
-    public const MODULES = ['work', 'notifications', 'people', 'attendance', 'payroll', 'recruitment', 'leave', 'lifecycle', 'performance', 'learning'];
+    public const MODULES = ['work', 'notifications', 'people', 'attendance', 'payroll', 'recruitment', 'leave', 'lifecycle', 'performance', 'learning', 'experience'];
 
     /** Own-data payroll keys: safe for everyone with an employee record. */
     public const PAYROLL_SELF = ['payroll.payslips.view_own', 'payroll.compensation.view_own', 'payroll.loans.view_own', 'payroll.benefits.view_own', 'payroll.benefits.enroll_own', 'payroll.tax_declaration.submit'];
 
-    private const MEMBER = ['learning.self', 'performance.self', 'lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'leave.view', 'leave.request', ...self::PAYROLL_SELF];
+    private const MEMBER = ['learning.self', 'experience.self', 'performance.self', 'lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'leave.view', 'leave.request', ...self::PAYROLL_SELF];
 
-    private const MANAGER = ['learning.self', 'learning.view', 'learning.skills.validate', 'learning.enrol.approve', 'learning.requests.approve', 'learning.reports.view', 'performance.self', 'performance.view', 'performance.goals.manage', 'performance.goals.approve', 'performance.reviews.manage', 'performance.reports.view', 'lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'attendance.team.view', 'attendance.approve', 'attendance.overtime.approve', 'attendance.reports.view', 'leave.view', 'leave.request', 'leave.team.view', 'leave.approve', 'leave.reports.view', 'people.changes.approve', 'people.quality.view', ...self::PAYROLL_SELF];
+    private const MANAGER = ['learning.self', 'learning.view', 'learning.skills.validate', 'learning.enrol.approve', 'learning.requests.approve', 'learning.reports.view', 'experience.self', 'experience.view', 'performance.self', 'performance.view', 'performance.goals.manage', 'performance.goals.approve', 'performance.reviews.manage', 'performance.reports.view', 'lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'attendance.team.view', 'attendance.approve', 'attendance.overtime.approve', 'attendance.reports.view', 'leave.view', 'leave.request', 'leave.team.view', 'leave.approve', 'leave.reports.view', 'people.changes.approve', 'people.quality.view', ...self::PAYROLL_SELF];
 
     /** HR gets everything except platform administration. */
     private const HR_EXCLUDED = ['roles.manage', 'settings.manage', 'users.manage', 'recruitment.confidential', 'performance.feedback.reveal'];

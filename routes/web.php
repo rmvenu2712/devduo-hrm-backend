@@ -26,6 +26,7 @@ Route::prefix('api')->group(function () {
         require __DIR__.'/recruitment.php';
         require __DIR__.'/lifecycle.php';
         require __DIR__.'/performance.php';
+        require __DIR__.'/learning.php';
         Route::post('logout', [AuthController::class, 'logout']);
         Route::post('change-password', [AuthController::class, 'change'])->middleware('throttle:5,1');
         Route::get('dashboard', [FeedController::class, 'dashboard']);

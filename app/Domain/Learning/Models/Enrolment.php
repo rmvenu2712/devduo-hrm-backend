@@ -14,4 +14,6 @@ class Enrolment extends TenantRecord
     {
         return ['due_on' => 'date:Y-m-d', 'decided_at' => 'datetime', 'completed_at' => 'datetime', 'waitlisted_at' => 'datetime'];
     }
+
+    public function course() { return $this->belongsTo(Course::class, 'course_id'); }
 }

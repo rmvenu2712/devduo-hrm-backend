@@ -31,6 +31,8 @@ class ReviewCycleTest extends PerformanceTestCase
         // one peer < min 2: excluded, weights renormalized: (60*4.5 + 20*5) / 80 = 4.625
         $view = $this->getJson($this->p("reviews/$rev"))->assertOk()->json();
         $this->assertSame('4.625', $view['computed_score']);
+        $this->assertSame(['goals', 'comp'], array_column($view['template']['sections'], 'key'));
+        $this->assertContains('TEAMWORK', array_column($view['template']['competencies'], 'code'));
         $peerLine = collect($view['trace'])->firstWhere('type', 'peer');
         $this->assertFalse($peerLine['included']);
         $this->assertSame('80.00', collect($view['trace'])->firstWhere('step', 'combined')['weights_total']);

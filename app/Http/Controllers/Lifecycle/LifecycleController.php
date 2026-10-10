@@ -169,9 +169,10 @@ final class LifecycleController
 
     public function moves(Request $r)
     {
-        $q = Move::whereIn('employee_id', app(DataScope::class)->constrain(Employee::query(), $r->user(), 'lifecycle.moves.manage')->select('employees.id'))->when($r->query('status'), fn ($q, $s) => $q->where('status', $s))->orderByDesc('id');
+        $permission = $r->user()->allows('lifecycle.moves.manage') ? 'lifecycle.moves.manage' : 'lifecycle.moves.approve';
+        $q = Move::whereIn('employee_id', app(DataScope::class)->constrain(Employee::query(), $r->user(), $permission)->select('employees.id'))->when($r->query('status'), fn ($q, $s) => $q->where('status', $s))->orderByDesc('id');
 
-        return $q->paginate(25)->through(fn ($m) => $this->moves->present($m));
+        return $q->paginate(25)->through(fn ($m) => $this->moves->present($m, $r->user()));
     }
 
     public function requestMove(Request $r)
@@ -180,19 +181,19 @@ final class LifecycleController
         $e = Employee::where('uuid', $d['employee_uuid'])->firstOrFail();
         $m = $this->moves->request($r->user(), $e, $d);
 
-        return response()->json($this->moves->present($m), 201);
+        return response()->json($this->moves->present($m, $r->user()), 201);
     }
 
     public function decideMove(Request $r, string $uuid)
     {
         $d = $r->validate(['decision' => ['required', Rule::in(['approve', 'reject'])], 'note' => 'nullable|string|max:1000']);
 
-        return $this->moves->present($this->moves->decide($r->user(), Move::where('uuid', $uuid)->firstOrFail(), $d['decision'], $d['note'] ?? null));
+        return $this->moves->present($this->moves->decide($r->user(), Move::where('uuid', $uuid)->firstOrFail(), $d['decision'], $d['note'] ?? null), $r->user());
     }
 
     public function cancelMove(Request $r, string $uuid)
     {
-        return $this->moves->present($this->moves->cancel($r->user(), Move::where('uuid', $uuid)->firstOrFail()));
+        return $this->moves->present($this->moves->cancel($r->user(), Move::where('uuid', $uuid)->firstOrFail()), $r->user());
     }
 
     // ---- offboarding ----------------------------------------------------------------------------------------------------------------

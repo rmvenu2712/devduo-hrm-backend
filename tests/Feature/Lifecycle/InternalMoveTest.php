@@ -23,11 +23,12 @@ class InternalMoveTest extends TestCase
         $emp = $this->hire('Eva Eng', ['role' => 'Team member', 'email' => 'eva@alpha.test']);
         $this->context($this->admin->tenant_id);
         $move = $this->postJson('/api/v1/lifecycle/moves', ['employee_uuid' => $emp->uuid, 'kind' => 'promotion', 'changes' => ['designation_id' => $this->org['designation'][1], 'bogus' => 1],
-            'effective_date' => '2026-10-20', 'reason' => 'Annual cycle'])->assertCreated()->assertJsonPath('status', 'pending')->json();
+            'effective_date' => '2026-10-20', 'reason' => 'Annual cycle'])->assertCreated()->assertJsonPath('status', 'pending')->assertJsonPath('employee_name', 'Eva Eng')->assertJsonPath('can_decide', false)->json();
         $this->assertArrayNotHasKey('bogus', $move['changes']);
 
         $this->postJson('/api/v1/lifecycle/moves/'.$move['uuid'].'/decision', ['decision' => 'approve'])->assertForbidden(); // maker cannot check
-        $this->signIn($this->checker)->postJson('/api/v1/lifecycle/moves/'.$move['uuid'].'/decision', ['decision' => 'approve'])->assertOk()->assertJsonPath('status', 'approved'); // future dated: not yet applied
+        $this->signIn($this->checker)->getJson('/api/v1/lifecycle/moves')->assertOk()->assertJsonPath('data.0.employee.name', 'Eva Eng')->assertJsonPath('data.0.employee_name', 'Eva Eng')->assertJsonPath('data.0.can_decide', true);
+        $this->postJson('/api/v1/lifecycle/moves/'.$move['uuid'].'/decision', ['decision' => 'approve'])->assertOk()->assertJsonPath('status', 'approved')->assertJsonPath('can_decide', false); // future dated: not yet applied
         $this->context($this->admin->tenant_id);
         $this->assertSame(1, Assignment::where('employee_id', $emp->id)->count());
 

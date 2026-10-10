@@ -146,7 +146,12 @@ final class ReviewService
         $role = $this->role($u, $r); abort_unless($role, 404);
         $cycle = $r->cycle; $settings = $cycle->settings ?? []; $scale = $cycle->template->scale;
         $final = in_array($r->status, Review::FINAL, true);
-        $out = $this->header($r) + ['role' => $role, 'scale' => ['min' => Num::round(Num::in($scale->min_value), 2), 'max' => Num::round(Num::in($scale->max_value), 2), 'labels' => $scale->labels]];
+        $out = $this->header($r) + [
+            'role' => $role,
+            'scale' => ['min' => Num::round(Num::in($scale->min_value), 2), 'max' => Num::round(Num::in($scale->max_value), 2), 'labels' => $scale->labels],
+            'template' => ['name' => $cycle->template->name, 'sections' => $cycle->template->sections,
+                'competencies' => Competency::where('active', true)->orderBy('name')->get(['code', 'name'])->all()],
+        ];
         $responses = Response::where('review_id', $r->id)->with('items')->orderBy('id')->get();
         $minPeers = max(1, (int) ($settings['min_peer_responses'] ?? 1));
         $anonymous = $settings['peer_anonymous'] ?? true;

@@ -120,11 +120,18 @@ final class MoveService
         return $out;
     }
 
-    public function present(Move $m): array
+    public function present(Move $m, ?User $viewer = null): array
     {
         $e = Employee::with('person')->find($m->employee_id);
+        $canDecide = $m->status === 'pending'
+            && $viewer !== null
+            && $viewer->id !== $m->requested_by
+            && $viewer->allows('lifecycle.moves.approve')
+            && app(DataScope::class)->canAccess($viewer, $m->employee_id, 'lifecycle.moves.approve');
 
         return ['uuid' => $m->uuid, 'kind' => $m->kind, 'status' => $m->status, 'effective_date' => $m->effective_date->toDateString(), 'reason' => $m->reason, 'changes' => $m->changes,
-            'employee' => ['uuid' => $e->uuid, 'name' => $e->person?->display_name], 'requested_by' => $m->requested_by, 'decided_by' => $m->decided_by, 'applied_at' => $m->applied_at?->toIso8601String(), 'impact' => $this->impact($m)];
+            'employee' => ['uuid' => $e->uuid, 'name' => $e->person?->display_name], 'employee_uuid' => $e->uuid, 'employee_name' => $e->person?->display_name,
+            'requested_by' => $m->requested_by, 'decided_by' => $m->decided_by, 'can_decide' => $canDecide,
+            'applied_at' => $m->applied_at?->toIso8601String(), 'impact' => $this->impact($m)];
     }
 }
