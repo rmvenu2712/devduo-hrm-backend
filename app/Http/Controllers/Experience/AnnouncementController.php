@@ -20,8 +20,10 @@ final class AnnouncementController
     public function create(Request $r)
     {
         $data = $r->validate(['title' => 'required|string|max:200', 'body' => 'required|string|max:50000',
+            'communication_type' => 'sometimes|in:announcement,event,onboarding',
             'acknowledgment_required' => 'sometimes|boolean', 'pinned' => 'sometimes|boolean', 'publish_at' => 'nullable|date_format:Y-m-d', 'expires_at' => 'nullable|date_format:Y-m-d',
-            'audience' => 'sometimes|array:legal_entity_ids,location_ids,designation_ids', 'audience.legal_entity_ids' => 'sometimes|array|max:50', 'audience.legal_entity_ids.*' => 'required|integer|min:1|distinct',
+            'event_starts_at' => 'required_if:communication_type,event|nullable|date', 'event_ends_at' => 'nullable|date|after_or_equal:event_starts_at', 'event_location' => 'nullable|string|max:200',
+            'audience' => 'sometimes|array:legal_entity_ids,location_ids,designation_ids,new_hires_within_days', 'audience.new_hires_within_days' => 'required_if:communication_type,onboarding|nullable|integer|min:1|max:90', 'audience.legal_entity_ids' => 'sometimes|array|max:50', 'audience.legal_entity_ids.*' => 'required|integer|min:1|distinct',
             'audience.location_ids' => 'sometimes|array|max:50', 'audience.location_ids.*' => 'required|integer|min:1|distinct',
             'audience.designation_ids' => 'sometimes|array|max:50', 'audience.designation_ids.*' => 'required|integer|min:1|distinct']);
         return response()->json($this->announcements->present($this->announcements->create($r->user(), $data), $r->user()), 201);
@@ -48,6 +50,13 @@ final class AnnouncementController
         abort_unless($announcement->status === 'published', 404);
         $this->announcements->record($r->user(), $announcement, true);
         return $this->announcements->present($announcement, $r->user());
+    }
+
+    public function rsvp(Request $r, string $uuid)
+    {
+        $data = $r->validate(['response' => 'required|in:attending,maybe,declined']);
+        $announcement = $this->announcements->visible($r->user())->where('uuid', $uuid)->firstOrFail();
+        return response()->json($this->announcements->rsvp($r->user(), $announcement, $data['response']));
     }
 
     public function metrics(Request $r, string $uuid)

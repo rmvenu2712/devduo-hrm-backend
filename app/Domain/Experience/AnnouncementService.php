@@ -10,6 +10,7 @@ use App\Domain\Tenancy\TenantClock;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Support\Carbon;
 use Illuminate\Validation\ValidationException;
 
 final class AnnouncementService
@@ -33,6 +34,9 @@ final class AnnouncementService
         $tracking = AnnouncementRead::where('announcement_id', $announcement->id)->where('user_id', $viewer->id)->first();
         $status = $announcement->expires_at && $announcement->expires_at->lt(TenantClock::today()) ? 'expired' : $announcement->status;
         return ['uuid' => $announcement->uuid, 'title' => $announcement->title, 'body' => $announcement->body,
+            'communication_type' => $announcement->communication_type ?? 'announcement', 'event_starts_at' => $announcement->event_starts_at?->toIso8601String(),
+            'event_ends_at' => $announcement->event_ends_at?->toIso8601String(), 'event_location' => $announcement->event_location,
+            'my_rsvp' => ($announcement->communication_type ?? 'announcement') === 'event' ? \App\Domain\Experience\Models\EventRsvp::where('announcement_id', $announcement->id)->where('user_id', $viewer->id)->value('response') : null,
             'acknowledgment_required' => $announcement->acknowledgment_required, 'status' => $status, 'pinned' => (bool) $announcement->pinned,
             'publish_at' => $announcement->publish_at?->format('Y-m-d'), 'read_at' => $tracking?->read_at?->toIso8601String(),
             'expires_at' => $announcement->expires_at?->format('Y-m-d'), 'audience' => $viewer->allows('experience.announcement.manage') ? ($announcement->audience_filters ?? []) : null,
@@ -42,11 +46,17 @@ final class AnnouncementService
     public function create(User $actor, array $data): Announcement
     {
         $filters = array_filter($data['audience'] ?? [], fn ($values) => ! empty($values));
+        $type = $data['communication_type'] ?? 'announcement';
+        if ($type === 'event' && empty($data['event_starts_at'])) throw ValidationException::withMessages(['event_starts_at' => 'Event campaigns need a start date and time.']);
+        if (($data['event_ends_at'] ?? null) && Carbon::parse($data['event_ends_at'], TenantClock::timezone())->lt(Carbon::parse($data['event_starts_at'], TenantClock::timezone()))) throw ValidationException::withMessages(['event_ends_at' => 'The event end must be on or after its start.']);
         $publishAt = $data['publish_at'] ?? TenantClock::today();
         if (! empty($data['expires_at']) && $data['expires_at'] < $publishAt) {
             throw ValidationException::withMessages(['expires_at' => 'The expiration date must be on or after the publish date.']);
         }
-        return Announcement::create(['uuid' => (string) Str::uuid(), 'title' => $data['title'], 'body' => $data['body'],
+        return Announcement::create(['uuid' => (string) Str::uuid(), 'title' => $data['title'], 'body' => $data['body'], 'communication_type' => $type,
+            'event_starts_at' => $type === 'event' ? Carbon::parse($data['event_starts_at'], TenantClock::timezone()) : null,
+            'event_ends_at' => $type === 'event' ? (isset($data['event_ends_at']) ? Carbon::parse($data['event_ends_at'], TenantClock::timezone()) : null) : null,
+            'event_location' => $type === 'event' ? ($data['event_location'] ?? null) : null,
             'acknowledgment_required' => $data['acknowledgment_required'] ?? false, 'publish_at' => $data['publish_at'] ?? TenantClock::today(),
             'audience_filters' => $filters, 'audience_all' => $filters === [], 'pinned' => $data['pinned'] ?? false, 'expires_at' => $data['expires_at'] ?? null,
             'status' => 'draft', 'created_by' => $actor->id]);
@@ -92,7 +102,15 @@ final class AnnouncementService
             $q->whereIn($column, $validIds);
         }
         $assignmentIds = $q->pluck('employee_id')->unique()->all();
-        return Employee::whereIn('id', $assignmentIds)->whereIn('status', Employee::WORKING)->whereHas('person', fn ($q) => $q->whereNotNull('user_id'))->pluck('id')->all();
+        $employees = Employee::whereIn('id', $assignmentIds)->whereHas('person', fn ($q) => $q->whereNotNull('user_id'));
+        if (! empty($filters['new_hires_within_days'])) {
+            $since = Carbon::parse($date)->subDays((int) $filters['new_hires_within_days'] - 1)->toDateString();
+            $employees->whereIn('status', array_merge(Employee::WORKING, ['preboarding']))
+                ->whereRaw('COALESCE(employment_start_date, joined_on) BETWEEN ? AND ?', [$since, $date]);
+        } else {
+            $employees->whereIn('status', Employee::WORKING);
+        }
+        return $employees->pluck('id')->all();
     }
 
     public function metrics(Announcement $announcement): array
@@ -105,8 +123,26 @@ final class AnnouncementService
         $tracking = AnnouncementRead::where('announcement_id', $announcement->id)->whereIn('user_id', $userIds);
         $read = (clone $tracking)->whereNotNull('read_at')->count();
         $ack = (clone $tracking)->whereNotNull('acknowledged_at')->count();
-        return ['suppressed' => false, 'audience_count' => count($employeeIds), 'read_count' => $read >= 5 ? $read : null,
+        $result = ['suppressed' => false, 'audience_count' => count($employeeIds), 'read_count' => $read >= 5 ? $read : null,
             'read_suppressed' => $read < 5, 'acknowledged_count' => $ack >= 5 ? $ack : null, 'acknowledged_suppressed' => $ack < 5];
+        if (($announcement->communication_type ?? '') === 'event') {
+            $counts = \App\Domain\Experience\Models\EventRsvp::where('announcement_id', $announcement->id)->select('response', DB::raw('count(*) as aggregate_count'))->groupBy('response')->pluck('aggregate_count', 'response');
+            $result['rsvps'] = ['attending' => (int) ($counts['attending'] ?? 0) >= 5 ? (int) $counts['attending'] : null,
+                'maybe' => (int) ($counts['maybe'] ?? 0) >= 5 ? (int) $counts['maybe'] : null,
+                'declined' => (int) ($counts['declined'] ?? 0) >= 5 ? (int) $counts['declined'] : null,
+                'suppressed' => ['attending' => (int) ($counts['attending'] ?? 0) < 5, 'maybe' => (int) ($counts['maybe'] ?? 0) < 5, 'declined' => (int) ($counts['declined'] ?? 0) < 5]];
+        }
+        return $result;
+    }
+
+    public function rsvp(User $viewer, Announcement $announcement, string $response): array
+    {
+        if (($announcement->communication_type ?? '') !== 'event' || $announcement->status !== 'published' || ! $announcement->event_starts_at || $announcement->event_starts_at->lte(Carbon::now(TenantClock::timezone()))) {
+            throw ValidationException::withMessages(['event' => 'RSVP is available only for a published event that has not started.']);
+        }
+        $rsvp = \App\Domain\Experience\Models\EventRsvp::updateOrCreate(['announcement_id' => $announcement->id, 'user_id' => $viewer->id], ['response' => $response]);
+        Audit::record('event.rsvp_recorded', 'experience', 'announcement:'.$announcement->uuid);
+        return ['response' => $rsvp->response];
     }
 
     public function record(User $viewer, Announcement $announcement, bool $acknowledge = false): AnnouncementRead

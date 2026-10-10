@@ -191,7 +191,7 @@ final class HelpdeskService
         foreach (array_unique($recipients) as $userId) {
             $user = User::where('tenant_id', app(\App\Domain\Tenancy\TenantContext::class)->id)->where('active', true)->find($userId);
             if (! $user || ! $user->allows('experience.ticket.manage') || ! $this->scope->hasTenantWide($user, 'experience.ticket.manage')) continue;
-            app(NotificationService::class)->send($user->id, 'HR ticket escalated', 'An HR service ticket requires attention. Open the service desk queue.', 'experience', '/experience');
+            app(NotificationService::class)->send($user->id, 'HR ticket escalated', 'An HR service ticket requires attention. Open the service desk queue.', 'experience.ticket', '/experience', true);
             $notified = true;
             $sent[] = $user->id;
         }
@@ -200,7 +200,7 @@ final class HelpdeskService
             $assigneeCanView = $assignee && $assignee->allows('experience.ticket.manage')
                 && ($this->scope->hasTenantWide($assignee, 'experience.ticket.manage') || $this->scope->canAccess($assignee, $ticket->employee_id, 'experience.ticket.manage'));
             if ($assigneeCanView && ! in_array($assignee->id, $sent, true)) {
-                app(NotificationService::class)->send($assignee->id, 'HR ticket escalated', 'A ticket assigned to you requires attention.', 'experience', '/experience');
+                app(NotificationService::class)->send($assignee->id, 'HR ticket escalated', 'A ticket assigned to you requires attention.', 'experience.ticket', '/experience', true);
                 $notified = true;
             }
         }

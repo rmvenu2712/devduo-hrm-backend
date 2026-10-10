@@ -177,6 +177,7 @@ final class WorkspaceProvisioner
         'experience.knowledge.manage' => ['Employee Experience', 'Create, version and publish HR knowledge articles'],
         'experience.announcement.manage' => ['Employee Experience', 'Create and publish employee announcements'],
         'experience.survey.manage' => ['Employee Experience', 'Create surveys and view privacy-thresholded aggregate results'],
+        'experience.survey.identifiable.view' => ['Employee Experience', 'View identifiable survey responses with audited access'],
         'experience.recognition.manage' => ['Employee Experience', 'Moderate employee recognition submissions'],
         'experience.analytics.view' => ['Employee Experience', 'View tenant-wide privacy-protected Experience service metrics'],
         'audit.view' => ['Administration', 'View audit history'], 'work.view' => ['My Work', 'View tasks'], 'work.manage' => ['My Work', 'Create and update tasks'],
@@ -192,7 +193,7 @@ final class WorkspaceProvisioner
     private const MANAGER = ['learning.self', 'learning.view', 'learning.skills.validate', 'learning.enrol.approve', 'learning.requests.approve', 'learning.reports.view', 'experience.self', 'experience.view', 'performance.self', 'performance.view', 'performance.goals.manage', 'performance.goals.approve', 'performance.reviews.manage', 'performance.reports.view', 'lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'attendance.team.view', 'attendance.approve', 'attendance.overtime.approve', 'attendance.reports.view', 'leave.view', 'leave.request', 'leave.team.view', 'leave.approve', 'leave.reports.view', 'people.changes.approve', 'people.quality.view', ...self::PAYROLL_SELF];
 
     /** HR gets everything except platform administration. */
-    private const HR_EXCLUDED = ['roles.manage', 'settings.manage', 'users.manage', 'recruitment.confidential', 'performance.feedback.reveal'];
+    private const HR_EXCLUDED = ['roles.manage', 'settings.manage', 'users.manage', 'recruitment.confidential', 'performance.feedback.reveal', 'experience.survey.identifiable.view'];
 
     /** Payroll administration keys (everything except self-service) are never part of the default HR administrator role. */
     private static function hrExcluded(): array

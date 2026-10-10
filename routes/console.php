@@ -38,6 +38,9 @@ Schedule::command('attendance:expire-requests')->dailyAt('01:00');
 Schedule::command('attendance:send-reminders')->everyFifteenMinutes();
 Schedule::command('experience:purge-survey-data')->dailyAt('03:00');
 Schedule::command('experience:escalate-sla-tickets')->hourly()->withoutOverlapping();
+Schedule::command('experience:deliver-announcements')->everyFiveMinutes()->withoutOverlapping();
+Schedule::command('experience:deliver-surveys')->hourly()->withoutOverlapping();
+Schedule::command('experience:send-milestones')->dailyAt('08:00')->withoutOverlapping();
 
 // Leave ledger operations (workstream B): idempotent nightly accrual, then expiry + alerts (+ optional auto carry-forward).
 Schedule::command('leave:accrue-nightly')->dailyAt('02:00');

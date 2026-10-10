@@ -7,6 +7,7 @@ use App\Domain\Access\DataScope;
 use App\Domain\Experience\Models\{Recognition, RecognitionPreference};
 use App\Domain\People\Models\Employee;
 use App\Models\User;
+use App\Domain\Notifications\NotificationService;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
@@ -67,6 +68,10 @@ final class RecognitionService
     {
         if ($recognition->status !== 'pending') throw ValidationException::withMessages(['status' => 'Only pending recognition can be moderated.']);
         $recognition->update(['status' => $decision, 'moderated_by' => $actor->id, 'moderated_at' => now()]);
+        if ($decision === 'approved' && ! RecognitionPreference::where('employee_id', $recognition->recipient_employee_id)->where('opted_out', true)->exists()) {
+            $recipientUserId = Employee::with('person')->find($recognition->recipient_employee_id)?->person?->user_id;
+            if ($recipientUserId) app(NotificationService::class)->send((int) $recipientUserId, 'You received recognition', 'A new recognition is available in your employee feed.', 'experience.recognition', '/experience/recognition');
+        }
         Audit::record('recognition.'.$decision, 'experience', 'recognition:'.$recognition->uuid);
         return $recognition->refresh();
     }

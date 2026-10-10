@@ -20,9 +20,13 @@ class RecognitionTest extends PerformanceTestCase
             'value_tags' => ['teamwork', 'ownership'], 'reward_reference' => 'badge-42'])->assertCreated()->assertJsonPath('status', 'pending')->json();
         $this->getJson('/api/v1/experience/recognitions')->assertOk()->assertJsonCount(0, 'data');
 
+        $this->actAs($this->emp1);
+        $this->putJson('/api/v1/experience/communication-preferences', ['channels' => ['recognition' => ['in_app' => false]]])->assertOk();
+
         $this->signIn($this->admin);
         $this->getJson('/api/v1/experience/recognitions')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.uuid', $created['uuid']);
         $this->postJson('/api/v1/experience/recognitions/'.$created['uuid'].'/moderate', ['decision' => 'approved'])->assertOk()->assertJsonPath('status', 'approved');
+        $this->assertDatabaseMissing('in_app_notifications', ['user_id' => $this->userOf($this->emp1)->id, 'title' => 'You received recognition']);
         $this->postJson('/api/v1/experience/recognitions/'.$created['uuid'].'/moderate', ['decision' => 'rejected'])->assertUnprocessable();
 
         $this->actAs($this->emp1);

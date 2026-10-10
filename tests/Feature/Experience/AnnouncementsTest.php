@@ -56,4 +56,40 @@ class AnnouncementsTest extends PerformanceTestCase
         $this->signIn($this->admin);
         $this->getJson('/api/v1/experience/announcements/'.$announcement['uuid'].'/metrics')->assertOk()->assertJsonPath('suppressed', true)->assertJsonMissingPath('audience_count');
     }
+
+    public function test_event_campaign_rsvp_is_private_replaceable_and_metrics_are_thresholded(): void
+    {
+        $starts = now()->addDays(3)->format('Y-m-d\\TH:i:s');
+        $event = $this->postJson('/api/v1/experience/announcements', ['title' => 'Workspace gathering', 'body' => 'Join us for the team event.',
+            'communication_type' => 'event', 'event_starts_at' => $starts, 'event_ends_at' => now()->addDays(3)->addHour()->format('Y-m-d\\TH:i:s'), 'event_location' => 'Main hall'])
+            ->assertCreated()->assertJsonPath('communication_type', 'event')->json();
+        $this->postJson('/api/v1/experience/announcements/'.$event['uuid'].'/publish')->assertOk();
+
+        $this->actAs($this->emp1);
+        $this->getJson('/api/v1/experience/announcements')->assertOk()->assertJsonPath('data.0.event_location', 'Main hall')->assertJsonPath('data.0.my_rsvp', null);
+        $this->putJson('/api/v1/experience/announcements/'.$event['uuid'].'/rsvp', ['response' => 'attending'])->assertOk()->assertJsonPath('response', 'attending');
+        $this->putJson('/api/v1/experience/announcements/'.$event['uuid'].'/rsvp', ['response' => 'maybe'])->assertOk()->assertJsonPath('response', 'maybe');
+        $this->assertSame(1, \DB::table('experience_event_rsvps')->where('announcement_id', \DB::table('experience_announcements')->where('uuid', $event['uuid'])->value('id'))->where('user_id', $this->userOf($this->emp1)->id)->count());
+        $this->getJson('/api/v1/experience/announcements')->assertJsonPath('data.0.my_rsvp', 'maybe');
+
+        $this->signIn($this->admin);
+        $this->getJson('/api/v1/experience/announcements/'.$event['uuid'].'/metrics')->assertOk()
+            ->assertJsonPath('rsvps.maybe', null)->assertJsonPath('rsvps.suppressed.maybe', true);
+        $this->bootTenant('beta');
+        $this->signIn($this->admin);
+        $this->putJson('/api/v1/experience/announcements/'.$event['uuid'].'/rsvp', ['response' => 'attending'])->assertNotFound();
+    }
+
+    public function test_onboarding_communication_targets_only_the_new_hire_snapshot(): void
+    {
+        $newHire = $this->hire('Nora Onboard', ['role' => 'Team member', 'joined_on' => now()->toDateString()]);
+        $message = $this->postJson('/api/v1/experience/announcements', ['title' => 'Getting started', 'body' => 'Welcome to the team.',
+            'communication_type' => 'onboarding', 'audience' => ['new_hires_within_days' => 7]])->assertCreated()->assertJsonPath('communication_type', 'onboarding')->json();
+        $this->postJson('/api/v1/experience/announcements/'.$message['uuid'].'/publish')->assertOk();
+
+        $this->actAs($newHire);
+        $this->getJson('/api/v1/experience/announcements')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.title', 'Getting started');
+        $this->actAs($this->emp1);
+        $this->getJson('/api/v1/experience/announcements')->assertOk()->assertJsonCount(0, 'data');
+    }
 }

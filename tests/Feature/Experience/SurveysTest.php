@@ -27,6 +27,7 @@ class SurveysTest extends PerformanceTestCase
         }
         $this->signIn($this->admin);
         $this->getJson('/api/v1/experience/surveys/'.$survey['uuid'].'/results')->assertOk()->assertJsonPath('suppressed', true)->assertJsonMissingPath('response_count')->assertJsonMissingPath('questions');
+        $this->getJson('/api/v1/experience/surveys/'.$survey['uuid'].'/export')->assertUnprocessable();
 
         $this->actAs($this->outsider);
         $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/responses', ['answers' => [$survey['questions'][0]['uuid'] => 4]])->assertOk();
@@ -40,6 +41,13 @@ class SurveysTest extends PerformanceTestCase
         $this->assertSame(1, \DB::table('experience_survey_answer_counts')->count());
         $this->assertSame(5, \DB::table('experience_survey_answer_counts')->value('response_count'));
         $this->assertSame(5, \DB::table('experience_survey_participants')->where('submitted', true)->count());
+        $export = $this->get('/api/v1/experience/surveys/'.$survey['uuid'].'/export')->assertOk()->assertDownload('survey-aggregates-'.$survey['uuid'].'.csv');
+        $csv = $export->streamedContent();
+        $this->assertStringContainsString('Is workload manageable?', $csv);
+        $this->assertStringContainsString(',4,', $csv);
+        $this->assertStringNotContainsString('Arun Kumar', $csv);
+        $this->assertStringNotContainsString('arun@alpha.test', $csv);
+        $this->assertSame(1, \DB::table('audit_logs')->where('action', 'survey.aggregate_exported')->count());
 
         $this->bootTenant('beta');
         $this->signIn($this->admin);
@@ -89,5 +97,65 @@ class SurveysTest extends PerformanceTestCase
         $this->assertSame(1, $purged);
         $this->assertDatabaseMissing('experience_survey_answer_counts', ['survey_id' => $surveyId]);
         $this->assertDatabaseMissing('experience_survey_participants', ['survey_id' => $surveyId]);
+    }
+
+    public function test_confidential_answers_are_encrypted_unlinked_and_aggregated_after_threshold(): void
+    {
+        $survey = $this->createSurvey(['response_mode' => 'confidential', 'requires_consent' => true]);
+        $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/publish')->assertOk();
+        $respondents = [$this->emp1, $this->emp2, $this->emp3, $this->mgr, $this->outsider];
+        foreach ($respondents as $employee) {
+            $this->actAs($employee);
+            $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/responses', ['answers' => [$survey['questions'][0]['uuid'] => 4], 'consent' => true])->assertOk();
+            if ($employee === $this->emp2) {
+                $this->assertDatabaseMissing('experience_survey_answer_counts', ['survey_id' => \DB::table('experience_surveys')->where('uuid', $survey['uuid'])->value('id')]);
+                $this->assertFalse(\Illuminate\Support\Facades\Schema::hasColumn('experience_survey_confidential_responses', 'participant_id'));
+                $this->assertFalse(\Illuminate\Support\Facades\Schema::hasColumn('experience_survey_confidential_responses', 'user_id'));
+                $ciphertext = \DB::table('experience_survey_confidential_responses')->value('encrypted_answers');
+                $this->assertNotSame(json_encode([$survey['questions'][0]['uuid'] => 4]), $ciphertext);
+            }
+        }
+        $this->signIn($this->admin);
+        $this->getJson('/api/v1/experience/surveys/'.$survey['uuid'].'/results')->assertOk()->assertJsonPath('response_mode', 'confidential')
+            ->assertJsonPath('questions.0.distribution.3.count', 5);
+        $this->assertSame(5, \DB::table('experience_survey_confidential_responses')->where('survey_id', \DB::table('experience_surveys')->where('uuid', $survey['uuid'])->value('id'))->count());
+    }
+
+    public function test_identified_mode_requires_consent_and_restricts_audited_individual_access(): void
+    {
+        $this->postJson('/api/v1/experience/surveys', ['title' => 'Identified feedback', 'response_mode' => 'identified', 'retention_until' => now()->addMonths(6)->toDateString(),
+            'questions' => [['prompt' => 'What support do you need?']]])->assertUnprocessable();
+        $survey = $this->createSurvey(['response_mode' => 'identified', 'requires_consent' => true]);
+        $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/publish')->assertOk();
+        $respondents = [$this->emp1, $this->emp2, $this->emp3, $this->mgr, $this->outsider];
+        foreach ($respondents as $employee) {
+            $this->actAs($employee);
+            $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/responses', ['answers' => [$survey['questions'][0]['uuid'] => 4], 'consent' => true])->assertOk();
+        }
+        $this->actAs($this->emp1);
+        $this->getJson('/api/v1/experience/surveys/'.$survey['uuid'].'/identified-responses')->assertForbidden();
+        $this->actAs($this->mgr);
+        $this->getJson('/api/v1/experience/surveys/'.$survey['uuid'].'/identified-responses')->assertForbidden();
+        $this->signIn($this->admin);
+        $this->getJson('/api/v1/experience/surveys/'.$survey['uuid'].'/identified-responses')->assertOk()
+            ->assertJsonPath('suppressed', false)->assertJsonPath('responses.0.employee', 'Arun Kumar')
+            ->assertJsonPath('responses.0.answers.0.value', 4);
+        $this->assertSame(1, \DB::table('audit_logs')->where('action', 'survey.identified_responses_accessed')->count());
+        $this->assertSame(5, \DB::table('experience_survey_identified_responses')->where('survey_id', \DB::table('experience_surveys')->where('uuid', $survey['uuid'])->value('id'))->count());
+    }
+
+    public function test_aggregate_export_sanitizes_spreadsheet_formulas_and_disables_caching(): void
+    {
+        $survey = $this->createSurvey(['questions' => [['prompt' => ' =HYPERLINK("https://invalid.test")']]]);
+        $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/publish')->assertOk();
+        foreach ([$this->emp1, $this->emp2, $this->emp3, $this->mgr, $this->outsider] as $employee) {
+            $this->actAs($employee);
+            $this->postJson('/api/v1/experience/surveys/'.$survey['uuid'].'/responses', ['answers' => [$survey['questions'][0]['uuid'] => 4]])->assertOk();
+        }
+        $this->signIn($this->admin);
+        $export = $this->get('/api/v1/experience/surveys/'.$survey['uuid'].'/export')->assertOk()->assertDownload();
+        $this->assertStringContainsString('private', $export->headers->get('Cache-Control'));
+        $this->assertStringContainsString('no-store', $export->headers->get('Cache-Control'));
+        $this->assertStringContainsString("'=HYPERLINK", $export->streamedContent());
     }
 }

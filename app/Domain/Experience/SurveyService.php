@@ -4,16 +4,19 @@ namespace App\Domain\Experience;
 
 use App\Domain\Audit\Audit;
 use App\Domain\Access\DataScope;
-use App\Domain\Experience\Models\{Survey, SurveyAnswerCount, SurveyParticipant, SurveyQuestion};
+use App\Domain\Experience\Models\{Survey, SurveyAnswerCount, SurveyConfidentialResponse, SurveyIdentifiedResponse, SurveyParticipant, SurveyQuestion};
 use App\Domain\People\Models\{Assignment, Employee};
 use App\Domain\Tenancy\TenantClock;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 final class SurveyService
 {
+    public function __construct(private SurveyCatalogService $catalog) {}
+
     public function visible(User $viewer)
     {
         $q = Survey::query()->with('questions');
@@ -26,11 +29,13 @@ final class SurveyService
 
     public function present(Survey $survey, User $viewer): array
     {
-        return ['uuid' => $survey->uuid, 'title' => $survey->title, 'description' => $survey->description, 'campaign_type' => $survey->campaign_type, 'status' => $survey->status,
+        return ['uuid' => $survey->uuid, 'title' => $survey->title, 'description' => $survey->description, 'campaign_type' => $survey->campaign_type, 'response_mode' => $survey->response_mode ?? 'anonymous', 'status' => $survey->status,
             'opens_at' => $survey->opens_at?->format('Y-m-d'), 'closes_at' => $survey->closes_at?->format('Y-m-d'),
             'requires_consent' => $survey->requires_consent, 'retention_until' => $survey->retention_until?->format('Y-m-d'),
+            'reminder_interval_days' => $survey->reminder_interval_days, 'max_reminders' => $survey->max_reminders,
             'submitted' => SurveyParticipant::where('survey_id', $survey->id)->where('user_id', $viewer->id)->where('submitted', true)->exists(),
-            'questions' => $survey->questions->map(fn ($q) => ['uuid' => $q->uuid, 'prompt' => $q->prompt, 'kind' => $q->kind, 'scale' => [1, 2, 3, 4, 5]])->values()];
+            'questions' => $survey->questions->map(fn ($q) => ['uuid' => $q->uuid, 'prompt' => $q->prompt, 'kind' => $q->kind,
+                'scale' => range((int) $q->scale_minimum, (int) $q->scale_maximum), 'scale_labels' => $q->scale_labels ?? []])->values()];
     }
 
     public function eligible(User $viewer, Survey $survey): bool
@@ -64,10 +69,15 @@ final class SurveyService
             $survey = Survey::create(['uuid' => (string) Str::uuid(), 'title' => $data['title'], 'description' => $data['description'] ?? null,
                 'status' => 'draft', 'opens_at' => $data['opens_at'] ?? TenantClock::today(), 'closes_at' => $data['closes_at'] ?? null,
                 'minimum_responses' => $data['minimum_responses'] ?? 5, 'campaign_type' => $data['campaign_type'] ?? 'custom', 'requires_consent' => $data['requires_consent'] ?? false,
-                'eligibility_filters' => $this->validateEligibility($data['eligibility'] ?? []), 'retention_until' => $data['retention_until'], 'created_by' => $actor->id]);
+                'eligibility_filters' => $this->validateEligibility($data['eligibility'] ?? []), 'retention_until' => $data['retention_until'],
+                'response_mode' => $data['response_mode'] ?? 'anonymous',
+                'reminder_interval_days' => $data['reminder_interval_days'] ?? null, 'max_reminders' => $data['max_reminders'] ?? 0, 'created_by' => $actor->id]);
             foreach ($data['questions'] as $i => $question) {
+                $bankQuestion = ! empty($question['bank_question_uuid']) ? $this->catalog->resolveQuestion($question['bank_question_uuid']) : null;
+                $scale = $this->catalog->resolveScale($question['scale_code'] ?? $data['scale_code'] ?? null);
                 SurveyQuestion::create(['uuid' => (string) Str::uuid(), 'survey_id' => $survey->id, 'position' => $i + 1,
-                    'prompt' => $question['prompt'], 'kind' => 'rating']);
+                    'prompt' => $bankQuestion?->prompt ?? trim($question['prompt']), 'bank_question_id' => $bankQuestion?->id, 'kind' => 'rating',
+                    'scale_minimum' => $scale->minimum_value, 'scale_maximum' => $scale->maximum_value, 'scale_labels' => $scale->labels]);
             }
             Audit::record('survey.created', 'experience', 'survey:'.$survey->uuid, ['question_count' => count($data['questions']), 'minimum_responses' => $survey->minimum_responses]);
             return $survey->load('questions');
@@ -96,14 +106,29 @@ final class SurveyService
         $expected = $questions->pluck('uuid')->sort()->values()->all();
         $provided = collect(array_keys($answers))->sort()->values()->all();
         if ($expected !== $provided) throw ValidationException::withMessages(['answers' => 'Submit one rating for every survey question.']);
+        foreach ($questions as $question) {
+            $answer = (int) $answers[$question->uuid];
+            if ($answer < $question->scale_minimum || $answer > $question->scale_maximum) {
+                throw ValidationException::withMessages(['answers' => "Each rating must be between {$question->scale_minimum} and {$question->scale_maximum} for its question."]);
+            }
+        }
         DB::transaction(function () use ($survey, $actor, $answers, $questions) {
             $participant = SurveyParticipant::firstOrCreate(['survey_id' => $survey->id, 'user_id' => $actor->id]);
             $participant = SurveyParticipant::whereKey($participant->id)->lockForUpdate()->firstOrFail();
             if ($participant->submitted) throw ValidationException::withMessages(['survey' => 'You have already submitted a response.']);
-            foreach ($questions as $question) {
-                $bucket = SurveyAnswerCount::firstOrCreate(['survey_id' => $survey->id, 'question_id' => $question->id, 'answer' => (int) $answers[$question->uuid]], ['response_count' => 0]);
-                $bucket = SurveyAnswerCount::whereKey($bucket->id)->lockForUpdate()->firstOrFail();
-                $bucket->increment('response_count');
+            if (($survey->response_mode ?? 'anonymous') === 'anonymous') {
+                foreach ($questions as $question) {
+                    $bucket = SurveyAnswerCount::firstOrCreate(['survey_id' => $survey->id, 'question_id' => $question->id, 'answer' => (int) $answers[$question->uuid]], ['response_count' => 0]);
+                    $bucket = SurveyAnswerCount::whereKey($bucket->id)->lockForUpdate()->firstOrFail();
+                    $bucket->increment('response_count');
+                }
+            } else {
+                $ciphertext = Crypt::encryptString(json_encode($answers, JSON_THROW_ON_ERROR));
+                if ($survey->response_mode === 'confidential') {
+                    SurveyConfidentialResponse::create(['survey_id' => $survey->id, 'response_uuid' => (string) Str::uuid(), 'encrypted_answers' => $ciphertext]);
+                } else {
+                    SurveyIdentifiedResponse::create(['survey_id' => $survey->id, 'participant_id' => $participant->id, 'encrypted_answers' => $ciphertext]);
+                }
             }
             $participant->update(['submitted' => true, 'consented' => $survey->requires_consent]);
         });
@@ -116,13 +141,48 @@ final class SurveyService
         }
         $count = SurveyParticipant::where('survey_id', $survey->id)->where('submitted', true)->count();
         if ($count < $survey->minimum_responses) return ['suppressed' => true, 'minimum_responses' => $survey->minimum_responses];
-        $questions = $survey->questions->map(function ($question) use ($survey, $count) {
-            $counts = SurveyAnswerCount::where('survey_id', $survey->id)->where('question_id', $question->id)->pluck('response_count', 'answer');
-            return ['uuid' => $question->uuid, 'prompt' => $question->prompt,
-                'distribution' => collect(range(1, 5))->map(fn ($rating) => ['rating' => $rating, 'count' => (int) ($counts[$rating] ?? 0) >= $survey->minimum_responses ? (int) $counts[$rating] : null,
+        $questionCounts = [];
+        if (($survey->response_mode ?? 'anonymous') === 'anonymous') {
+            foreach ($survey->questions as $question) $questionCounts[$question->uuid] = SurveyAnswerCount::where('survey_id', $survey->id)->where('question_id', $question->id)->pluck('response_count', 'answer')->all();
+        } else {
+            $responses = $survey->response_mode === 'confidential'
+                ? SurveyConfidentialResponse::where('survey_id', $survey->id)->pluck('encrypted_answers')
+                : SurveyIdentifiedResponse::where('survey_id', $survey->id)->pluck('encrypted_answers');
+            foreach ($responses as $ciphertext) {
+                $answers = json_decode(Crypt::decryptString($ciphertext), true, 512, JSON_THROW_ON_ERROR);
+                foreach ($answers as $questionUuid => $value) $questionCounts[$questionUuid][$value] = ($questionCounts[$questionUuid][$value] ?? 0) + 1;
+            }
+        }
+        $questions = $survey->questions->map(function ($question) use ($survey, $count, $questionCounts) {
+            $counts = $questionCounts[$question->uuid] ?? [];
+            return ['uuid' => $question->uuid, 'prompt' => $question->prompt, 'scale_labels' => $question->scale_labels ?? [],
+                'distribution' => collect(range((int) $question->scale_minimum, (int) $question->scale_maximum))->map(fn ($rating) => ['rating' => $rating, 'label' => ($question->scale_labels ?? [])[(string) $rating] ?? null, 'count' => (int) ($counts[$rating] ?? 0) >= $survey->minimum_responses ? (int) $counts[$rating] : null,
                     'suppressed' => (int) ($counts[$rating] ?? 0) < $survey->minimum_responses])->all()];
         })->values()->all();
-        return ['suppressed' => false, 'response_count' => $count, 'minimum_responses' => $survey->minimum_responses, 'questions' => $questions];
+        return ['suppressed' => false, 'response_count' => $count, 'minimum_responses' => $survey->minimum_responses, 'response_mode' => $survey->response_mode ?? 'anonymous', 'questions' => $questions];
+    }
+
+    public function identifiedResponses(Survey $survey): array
+    {
+        abort_unless($survey->response_mode === 'identified', 404);
+        if ($survey->data_purged_at || ($survey->retention_until && $survey->retention_until->lt(TenantClock::today()))) {
+            return ['retention_expired' => true];
+        }
+        $count = SurveyParticipant::where('survey_id', $survey->id)->where('submitted', true)->count();
+        if ($count < $survey->minimum_responses) return ['suppressed' => true, 'minimum_responses' => $survey->minimum_responses];
+        $records = SurveyIdentifiedResponse::where('survey_id', $survey->id)->orderBy('id')->limit(1000)->get();
+        $participants = SurveyParticipant::whereIn('id', $records->pluck('participant_id'))->get()->keyBy('id');
+        $users = User::where('tenant_id', $survey->tenant_id)->whereIn('id', $participants->pluck('user_id'))->get()->keyBy('id');
+        $questions = $survey->questions->keyBy('uuid');
+        return ['suppressed' => false, 'minimum_responses' => $survey->minimum_responses, 'responses' => $records->map(function ($record) use ($participants, $users, $questions) {
+            $participant = $participants->get($record->participant_id);
+            $user = $participant ? $users->get($participant->user_id) : null;
+            $answers = json_decode(Crypt::decryptString($record->encrypted_answers), true, 512, JSON_THROW_ON_ERROR);
+            return ['employee' => $user?->name, 'answers' => collect($answers)->map(function ($value, $uuid) use ($questions) {
+                $question = $questions->get($uuid);
+                return ['prompt' => $question?->prompt, 'value' => (int) $value, 'label' => $question?->scale_labels[(string) $value] ?? null];
+            })->values()->all()];
+        })->values()->all()];
     }
 
     public function purgeExpiredData(): int
@@ -132,6 +192,8 @@ final class SurveyService
         foreach (Survey::whereNotNull('retention_until')->where('retention_until', '<', $today)->whereNull('data_purged_at')->get() as $survey) {
             DB::transaction(function () use ($survey, &$purged) {
                 SurveyAnswerCount::where('survey_id', $survey->id)->delete();
+                SurveyConfidentialResponse::where('survey_id', $survey->id)->delete();
+                SurveyIdentifiedResponse::where('survey_id', $survey->id)->delete();
                 SurveyParticipant::where('survey_id', $survey->id)->delete();
                 SurveyQuestion::where('survey_id', $survey->id)->delete();
                 $survey->update(['data_purged_at' => now()]);

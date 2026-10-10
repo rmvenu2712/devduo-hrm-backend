@@ -4,6 +4,7 @@ use App\Http\Controllers\Experience\HelpdeskController as Helpdesk;
 use App\Http\Controllers\Experience\AnnouncementController as Announcements;
 use App\Http\Controllers\Experience\SurveyController as Surveys;
 use App\Http\Controllers\Experience\RecognitionController as Recognition;
+use App\Http\Controllers\Experience\CommunicationPreferenceController as CommunicationPreferences;
 use Illuminate\Support\Facades\Route;
 
 /* Phase 10 helpdesk core; included under authenticated tenant routes. */
@@ -24,12 +25,21 @@ Route::prefix('v1/experience')->middleware('module:experience')->group(function 
     Route::post('announcements/{uuid}/publish', [Announcements::class, 'publish'])->middleware('permission:experience.announcement.manage');
     Route::post('announcements/{uuid}/read', [Announcements::class, 'read'])->middleware('permission:experience.self|experience.view|experience.ticket.manage|experience.announcement.manage');
     Route::post('announcements/{uuid}/acknowledge', [Announcements::class, 'acknowledge'])->middleware('permission:experience.self|experience.view|experience.ticket.manage|experience.announcement.manage');
+    Route::put('announcements/{uuid}/rsvp', [Announcements::class, 'rsvp'])->middleware('permission:experience.self');
     Route::get('surveys', [Surveys::class, 'index'])->middleware('permission:experience.self|experience.view|experience.ticket.manage|experience.survey.manage');
     Route::get('surveys/audience-options', [Surveys::class, 'audienceOptions'])->middleware('permission:experience.survey.manage');
+    Route::get('survey-catalog/questions', [Surveys::class, 'bankQuestions'])->middleware('permission:experience.survey.manage');
+    Route::post('survey-catalog/questions', [Surveys::class, 'addBankQuestion'])->middleware('permission:experience.survey.manage');
+    Route::get('survey-catalog/scales', [Surveys::class, 'scales'])->middleware('permission:experience.survey.manage');
+    Route::post('survey-catalog/scales', [Surveys::class, 'addScale'])->middleware('permission:experience.survey.manage');
     Route::post('surveys', [Surveys::class, 'create'])->middleware('permission:experience.survey.manage');
     Route::post('surveys/{uuid}/publish', [Surveys::class, 'publish'])->middleware('permission:experience.survey.manage');
     Route::post('surveys/{uuid}/responses', [Surveys::class, 'submit'])->middleware('permission:experience.self');
+    Route::get('communication-preferences', [CommunicationPreferences::class, 'show'])->middleware('permission:experience.self');
+    Route::put('communication-preferences', [CommunicationPreferences::class, 'update'])->middleware('permission:experience.self');
     Route::get('surveys/{uuid}/results', [Surveys::class, 'results'])->middleware('permission:experience.survey.manage');
+    Route::get('surveys/{uuid}/export', [Surveys::class, 'export'])->middleware(['permission:experience.survey.manage', 'throttle:10,1']);
+    Route::get('surveys/{uuid}/identified-responses', [Surveys::class, 'identifiedResponses'])->middleware(['permission:experience.survey.identifiable.view', 'throttle:10,1']);
     Route::get('recognitions', [Recognition::class, 'index'])->middleware('permission:experience.self|experience.recognition.manage');
     Route::get('recognitions/recipients', [Recognition::class, 'recipients'])->middleware('permission:experience.self');
     Route::post('recognitions', [Recognition::class, 'create'])->middleware('permission:experience.self');

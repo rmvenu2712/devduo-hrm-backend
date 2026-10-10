@@ -8,5 +8,5 @@ class Announcement extends TenantRecord
 {
     use HasPublicId;
     protected $table = 'experience_announcements';
-    protected function casts(): array { return ['acknowledgment_required' => 'boolean', 'publish_at' => 'date:Y-m-d', 'expires_at' => 'date:Y-m-d', 'audience_filters' => 'array', 'audience_all' => 'boolean', 'pinned' => 'boolean']; }
+    protected function casts(): array { return ['acknowledgment_required' => 'boolean', 'publish_at' => 'date:Y-m-d', 'expires_at' => 'date:Y-m-d', 'event_starts_at' => 'datetime', 'event_ends_at' => 'datetime', 'notifications_sent_at' => 'datetime', 'audience_filters' => 'array', 'audience_all' => 'boolean', 'pinned' => 'boolean']; }
 }
