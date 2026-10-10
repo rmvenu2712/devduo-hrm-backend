@@ -100,6 +100,7 @@ class OnboardingTest extends TestCase
         $v2 = $this->postJson('/api/v1/lifecycle/templates/'.$generic.'/versions', ['tasks' => [['title' => 'Generic task v2', 'owner_type' => 'hr']]])->assertCreated()->json('versions.1.uuid');
         $this->postJson('/api/v1/lifecycle/template-versions/'.$v2.'/publish')->assertOk();
         $this->postJson('/api/v1/lifecycle/template-versions/'.$v2.'/publish')->assertConflict();
+        $this->context($this->admin->tenant_id);
         $third = $this->hire('Third Hire', ['joined_on' => '2026-11-03', 'status' => 'preboarding']);
         $this->context($this->admin->tenant_id);
         $this->assertSame('Generic task v2', $this->postJson('/api/v1/lifecycle/cases', ['employee_uuid' => $third->uuid, 'kind' => 'onboarding'])->json('tasks.0.title'));

@@ -32,6 +32,7 @@ Schedule::command('people:document-expiry')->dailyAt('06:15');
 Schedule::command('people:scan-quality')->dailyAt('01:00');
 Schedule::command('lifecycle:remind')->dailyAt('07:00');
 Schedule::command('lifecycle:housekeeping')->dailyAt('00:30');
+Schedule::command('performance:remind')->dailyAt('07:30');
 Schedule::command('attendance:process-nightly')->dailyAt('01:30');
 Schedule::command('attendance:expire-requests')->dailyAt('01:00');
 Schedule::command('attendance:send-reminders')->everyFifteenMinutes();

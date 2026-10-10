@@ -146,20 +146,32 @@ final class WorkspaceProvisioner
         'lifecycle.exit.view' => ['Lifecycle', 'Read confidential exit interviews'],
         'lifecycle.alumni.manage' => ['Lifecycle', 'Manage alumni records and rehire eligibility'],
         'lifecycle.self' => ['Lifecycle', 'Complete your own lifecycle tasks and exit interview'],
+        'performance.self' => ['Performance', 'Own goals, check-ins, reviews, feedback and 1:1 notes'],
+        'performance.view' => ['Performance', 'View goals and review progress of people in your data scope'],
+        'performance.goals.manage' => ['Performance', 'Create and cascade goals for people in scope'],
+        'performance.goals.approve' => ['Performance', 'Approve goals for people in scope'],
+        'performance.cycles.manage' => ['Performance', 'Manage review cycles, templates, rating scales and competencies'],
+        'performance.reviews.manage' => ['Performance', 'Write manager reviews and nominate reviewers for people in scope'],
+        'performance.calibrate' => ['Performance', 'Propose calibration rating changes'],
+        'performance.calibrate.approve' => ['Performance', 'Independently approve calibration changes and finalize reviews'],
+        'performance.pip.manage' => ['Performance', 'Manage confidential performance improvement plans'],
+        'performance.reports.view' => ['Performance', 'View performance dashboards and distributions'],
+        'performance.outcomes.view' => ['Performance', 'Read finalized review outcomes (compensation and promotion inputs)'],
+        'performance.feedback.reveal' => ['Performance', 'Reveal anonymous feedback authors'],
         'audit.view' => ['Administration', 'View audit history'], 'work.view' => ['My Work', 'View tasks'], 'work.manage' => ['My Work', 'Create and update tasks'],
     ];
 
-    public const MODULES = ['work', 'notifications', 'people', 'attendance', 'payroll', 'recruitment', 'leave', 'lifecycle'];
+    public const MODULES = ['work', 'notifications', 'people', 'attendance', 'payroll', 'recruitment', 'leave', 'lifecycle', 'performance'];
 
     /** Own-data payroll keys: safe for everyone with an employee record. */
     public const PAYROLL_SELF = ['payroll.payslips.view_own', 'payroll.compensation.view_own', 'payroll.loans.view_own', 'payroll.benefits.view_own', 'payroll.benefits.enroll_own', 'payroll.tax_declaration.submit'];
 
-    private const MEMBER = ['lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'leave.view', 'leave.request', ...self::PAYROLL_SELF];
+    private const MEMBER = ['performance.self', 'lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'leave.view', 'leave.request', ...self::PAYROLL_SELF];
 
-    private const MANAGER = ['lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'attendance.team.view', 'attendance.approve', 'attendance.overtime.approve', 'attendance.reports.view', 'leave.view', 'leave.request', 'leave.team.view', 'leave.approve', 'leave.reports.view', 'people.changes.approve', 'people.quality.view', ...self::PAYROLL_SELF];
+    private const MANAGER = ['performance.self', 'performance.view', 'performance.goals.manage', 'performance.goals.approve', 'performance.reviews.manage', 'performance.reports.view', 'lifecycle.self', 'work.view', 'work.manage', 'people.view', 'people.directory', 'attendance.view', 'attendance.team.view', 'attendance.approve', 'attendance.overtime.approve', 'attendance.reports.view', 'leave.view', 'leave.request', 'leave.team.view', 'leave.approve', 'leave.reports.view', 'people.changes.approve', 'people.quality.view', ...self::PAYROLL_SELF];
 
     /** HR gets everything except platform administration. */
-    private const HR_EXCLUDED = ['roles.manage', 'settings.manage', 'users.manage', 'recruitment.confidential'];
+    private const HR_EXCLUDED = ['roles.manage', 'settings.manage', 'users.manage', 'recruitment.confidential', 'performance.feedback.reveal'];
 
     /** Payroll administration keys (everything except self-service) are never part of the default HR administrator role. */
     private static function hrExcluded(): array
