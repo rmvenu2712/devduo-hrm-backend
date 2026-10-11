@@ -148,15 +148,17 @@ final class PayrollCalculator implements EmployeeCalculator
             // adjustments: signed (positive pays, negative recovers); kind "recovery" always recovers
             foreach ($request['adjustments'] ?? [] as $adj) {
                 $signed = Decimal::of($adj['amount']);
-                $pays = $adj['kind'] !== 'recovery' && ! $signed->isNegative();
+                $reversesKind = $adj['kind'] === 'reversal' ? ($adj['trace']['reverses_kind'] ?? null) : null;
+                $pays = $adj['kind'] === 'reversal' && $reversesKind === 'recovery' ? true : ($adj['kind'] !== 'recovery' && ! $signed->isNegative());
                 $amt = Rounding::apply($signed->abs(), $exp, $mode);
                 if (Decimal::isZero($amt)) {
                     continue;
                 }
                 $code = ($adj['component_code'] ?? null) ?: ($pays ? strtoupper($adj['kind']) : strtoupper($adj['kind']).'_RECOVERY');
-                $taxablePay = $pays && $adj['kind'] !== 'manual_net';
+                $taxablePay = $pays && $adj['kind'] !== 'manual_net' && $reversesKind !== 'manual_net' && $reversesKind !== 'recovery';
+                $originKind = $reversesKind ?? $adj['kind'];
                 $components[] = ['component_code' => $code, 'name' => ucfirst(str_replace('_', ' ', $adj['kind'])).($pays ? '' : ' recovery'), 'kind' => $pays ? 'earning' : 'deduction', 'amount' => $amt,
-                    'taxable_amount' => $taxablePay ? $amt : null, 'origin' => in_array($adj['kind'], ['arrear', 'retro'], true) ? $adj['kind'] : 'adjustment',
+                    'taxable_amount' => $taxablePay ? $amt : null, 'origin' => in_array($originKind, ['arrear', 'retro'], true) ? $originKind : 'adjustment',
                     'source_ref' => 'adjustment:'.($adj['id'] ?? ''), 'sequence' => $seq++, 'trace' => $adj['trace'] ?? null];
                 if ($taxablePay) {
                     $taxable = $taxable->plus($amt);
@@ -187,6 +189,35 @@ final class PayrollCalculator implements EmployeeCalculator
                     'origin' => 'loan', 'source_ref' => $loan['reference'] ?? 'loan_installment:'.$loan['id'], 'sequence' => $seq++];
             }
 
+            foreach ($request['benefit_enrollments'] ?? [] as $benefit) {
+                $from = max($request['period_start'], $benefit['effective_from']);
+                $to = min($request['period_end'], $benefit['effective_to'] ?? $request['period_end']);
+                if ($from > $to) {
+                    continue;
+                }
+                $periodDays = $this->calendarDays($request['period_start'], $request['period_end']);
+                $coveredDays = $this->calendarDays($from, $to);
+                $factor = Decimal::str(Decimal::div($coveredDays, $periodDays, 8), 8);
+                $baseCode = strtoupper(preg_replace('/[^A-Za-z0-9_]/', '_', $benefit['component_code'] ?: 'BENEFIT_'.$benefit['plan_code']));
+                foreach ([
+                    ['field' => 'employee_contribution', 'suffix' => '_EE', 'kind' => 'employee_contribution', 'name' => 'Employee benefit contribution'],
+                    ['field' => 'employer_contribution', 'suffix' => '_ER', 'kind' => 'employer_contribution', 'name' => 'Employer benefit contribution'],
+                ] as $contribution) {
+                    $fixed = $benefit[$contribution['field']] ?? '0';
+                    if (Decimal::isZero($fixed)) {
+                        continue;
+                    }
+                    $amount = Rounding::apply(Decimal::mul($fixed, $factor), $exp, $mode);
+                    if (Decimal::isZero($amount)) {
+                        continue;
+                    }
+                    $components[] = ['component_code' => substr($baseCode, 0, 35).$contribution['suffix'], 'name' => $contribution['name'].' - '.$benefit['plan_name'],
+                        'kind' => $contribution['kind'], 'amount' => $amount, 'origin' => 'benefit', 'source_ref' => 'benefit:'.$benefit['enrollment_uuid'], 'sequence' => $seq++,
+                        'trace' => ['enrollment_uuid' => $benefit['enrollment_uuid'], 'plan_code' => $benefit['plan_code'], 'fixed_per_period' => $fixed, 'covered_from' => $from, 'covered_to' => $to,
+                            'covered_days' => $coveredDays, 'period_days' => $periodDays, 'proration_factor' => $factor]];
+                }
+            }
+
             $totals = ResultStore::totals($components, $currency);
             if (Decimal::isNegative($totals['net'])) {
                 $warnings[] = ['code' => 'negative_net', 'message' => 'Net pay is negative.'];
@@ -207,6 +238,14 @@ final class PayrollCalculator implements EmployeeCalculator
     private function failed(int $id, string $currency, string $engine, array $request, string $code, string $message): ResultDraft
     {
         return new ResultDraft($id, $currency, [], $engine, inputSnapshot: ['request' => $request], errors: [['code' => $code, 'message' => $message]]);
+    }
+
+    private function calendarDays(string $from, string $to): int
+    {
+        $start = new \DateTimeImmutable($from, new \DateTimeZone('UTC'));
+        $end = new \DateTimeImmutable($to, new \DateTimeZone('UTC'));
+
+        return (int) $start->diff($end)->days + 1;
     }
 
     /** @return array{0:string,1:string,2:?string} LOP days, overtime hours, attendance payable days */

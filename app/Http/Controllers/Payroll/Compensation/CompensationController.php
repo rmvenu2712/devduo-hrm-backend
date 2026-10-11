@@ -168,7 +168,8 @@ final class CompensationController
 
     public function previewCompensationImport(Request $r, CompensationImportService $svc)
     {
-        $data = $r->validate(['file' => 'required|file|max:10240', 'type' => ['required', Rule::in(PayrollStates::REVISION_TYPES)], 'effective_date' => 'required|date_format:Y-m-d', 'reason' => 'required|string|max:2000']);
+        $data = $r->validate(['file' => 'required|file|max:10240', 'type' => ['required', Rule::in(PayrollStates::REVISION_TYPES)], 'effective_date' => 'required|date_format:Y-m-d', 'reason' => 'required|string|max:2000',
+            'mapping' => 'sometimes|array', 'mapping.employee_number' => 'sometimes|nullable|string|max:80', 'mapping.component_code' => 'sometimes|nullable|string|max:80', 'mapping.amount' => 'sometimes|nullable|string|max:80']);
         $result = $svc->preview($r->user(), $data['file'], $data);
         if (! $this->reveal($r) && isset($result['batch_preview']['rows'])) {
             foreach ($result['batch_preview']['rows'] as &$row) {

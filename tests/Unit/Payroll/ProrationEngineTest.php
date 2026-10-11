@@ -141,6 +141,20 @@ class ProrationEngineTest extends TestCase
         $this->assertSame('deduction', $by['ADV']['kind']);
     }
 
+    public function test_adjustment_reversals_retain_original_tax_and_recovery_semantics(): void
+    {
+        $draft = $this->calc()->calculate($this->request(['adjustments' => [
+            ['id' => 1, 'kind' => 'reversal', 'component_code' => 'RECOVERY_REFUND', 'amount' => '100.00', 'trace' => ['reverses_kind' => 'recovery']],
+            ['id' => 2, 'kind' => 'reversal', 'component_code' => 'NET_CORRECTION', 'amount' => '-50.00', 'trace' => ['reverses_kind' => 'manual_net']],
+        ]]));
+        $by = $this->byCode($draft);
+
+        $this->assertSame('earning', $by['RECOVERY_REFUND']['kind']);
+        $this->assertNull($by['RECOVERY_REFUND']['taxable_amount']);
+        $this->assertSame('deduction', $by['NET_CORRECTION']['kind']);
+        $this->assertNull($by['NET_CORRECTION']['taxable_amount']);
+    }
+
     public function test_same_request_gives_identical_draft_and_failures_are_isolated(): void
     {
         $this->assertEquals($this->calc()->calculate($this->request()), $this->calc()->calculate($this->request()));

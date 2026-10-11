@@ -28,23 +28,40 @@ final class InputImportService
         $period = PayrollPeriod::query()->with('group')->where('uuid', $options['period_uuid'])->firstOrFail();
         $reader = TabularReader::open($file->getRealPath(), $file->getClientOriginalName(), ['max_rows' => 10001, 'max_bytes' => 10485760]);
         $headers = $reader->headers();
-        $missing = array_diff(['employee_number', 'kind'], $headers);
-        if ($missing || (! in_array('amount', $headers, true) && ! in_array('quantity', $headers, true))) {
-            throw ValidationException::withMessages(['file' => 'Required columns are employee_number, kind, and at least one of amount or quantity.']);
+        $rawHeaders = $reader->rawHeaders();
+        $mapping = [];
+        foreach (['employee_number', 'kind', 'component_code', 'amount', 'quantity'] as $field) {
+            $requestedHeader = trim((string) (array_key_exists($field, $options['mapping'] ?? []) ? ($options['mapping'][$field] ?? '') : (in_array($field, $headers, true) ? $field : '')));
+            $header = $requestedHeader === '' ? '' : TabularReader::normalizeHeader($requestedHeader);
+            if ($header !== '' && ! in_array($header, $headers, true)) {
+                throw ValidationException::withMessages(['mapping.'.$field => 'Choose a header present in the uploaded file. Header matching ignores case and normalizes spaces.']);
+            }
+            $mapping[$field] = $header !== '' && in_array($header, $headers, true) ? $header : null;
+        }
+        if (! $mapping['employee_number'] || ! $mapping['kind'] || (! $mapping['amount'] && ! $mapping['quantity'])) {
+            throw ValidationException::withMessages(['mapping' => 'Map employee number, kind, and at least one of amount or quantity to file columns.']);
         }
         $import = PayrollImport::create(['kind' => 'payroll_input', 'file_name' => Str::limit(basename($file->getClientOriginalName()), 200, ''), 'status' => 'uploaded',
-            'mapping' => ['period_uuid' => $period->uuid, 'source' => $options['source'], 'headers' => $headers], 'created_by' => $actor->id]);
+            'mapping' => ['period_uuid' => $period->uuid, 'source' => $options['source'], 'headers' => $headers, 'columns' => $mapping], 'created_by' => $actor->id]);
         $seen = [];
         $count = 0;
         foreach ($reader->rows() as $number => $row) {
             $count++;
             $errors = [];
-            $employeeNumber = trim((string) ($row['employee_number'] ?? ''));
+            $values = [];
+            foreach ($mapping as $field => $header) {
+                $values[$field] = $header ? ($row[$header] ?? '') : '';
+            }
+            $sourceRow = [];
+            foreach ($headers as $index => $header) {
+                $sourceRow[$rawHeaders[$index] ?? $header] = $row[$header] ?? null;
+            }
+            $employeeNumber = trim((string) ($values['employee_number'] ?? ''));
             $employee = $employeeNumber === '' ? null : app(DataScope::class)->constrain(Employee::query(), $actor, 'payroll.inputs.manage')->where('employee_number', $employeeNumber)->first();
-            $kind = trim((string) ($row['kind'] ?? ''));
-            $amount = trim((string) ($row['amount'] ?? ''));
-            $quantity = trim((string) ($row['quantity'] ?? ''));
-            $component = strtoupper(trim((string) ($row['component_code'] ?? '')));
+            $kind = trim((string) ($values['kind'] ?? ''));
+            $amount = trim((string) ($values['amount'] ?? ''));
+            $quantity = trim((string) ($values['quantity'] ?? ''));
+            $component = strtoupper(trim((string) ($values['component_code'] ?? '')));
             if (! $employee) {
                 $errors[] = 'Employee number is missing or unavailable.';
             }
@@ -71,7 +88,7 @@ final class InputImportService
             if ($status === 'valid') {
                 $seen[$signature] = true;
             }
-            PayrollImportRow::create(['import_id' => $import->id, 'row_number' => $number, 'status' => $status, 'raw' => $row, 'errors' => $errors, 'dedupe_key' => $signature]);
+            PayrollImportRow::create(['import_id' => $import->id, 'row_number' => $number, 'status' => $status, 'raw' => ['source_row' => $sourceRow, 'values' => $values], 'errors' => $errors, 'dedupe_key' => $signature]);
         }
         $rows = $import->rows()->get();
         $import->update(['status' => 'previewed', 'rows_total' => $count, 'rows_ok' => $rows->where('status', 'valid')->count(), 'rows_error' => $rows->where('status', 'error')->count(), 'rows_duplicate' => $rows->where('status', 'duplicate')->count()]);
@@ -92,7 +109,7 @@ final class InputImportService
         $rows = $import->rows()->where('status', 'valid')->orderBy('row_number')->get();
         $period = PayrollPeriod::query()->where('uuid', $periodUuid)->firstOrFail();
         foreach ($rows as $row) {
-            $raw = $row->raw ?? [];
+            $raw = $row->raw['values'] ?? $row->raw ?? [];
             try {
                 $employee = app(DataScope::class)->constrain(Employee::query(), $actor, 'payroll.inputs.manage')->where('employee_number', $raw['employee_number'] ?? '')->firstOrFail();
                 $this->inputs->create($actor, ['employee_uuid' => $employee->uuid, 'period_uuid' => $period->uuid, 'source' => $import->mapping['source'], 'kind' => $raw['kind'],
@@ -117,7 +134,7 @@ final class InputImportService
         abort_unless($import->status === 'committed', 409, 'Only a committed import can retry failed rows.');
         $period = PayrollPeriod::query()->where('uuid', $import->mapping['period_uuid'])->firstOrFail();
         foreach ($import->rows()->where('status', 'error')->orderBy('row_number')->get() as $row) {
-            $raw = $row->raw ?? [];
+            $raw = $row->raw['values'] ?? $row->raw ?? [];
             try {
                 $employee = app(DataScope::class)->constrain(Employee::query(), $actor, 'payroll.inputs.manage')->where('employee_number', $raw['employee_number'] ?? '')->firstOrFail();
                 $this->inputs->create($actor, ['employee_uuid' => $employee->uuid, 'period_uuid' => $period->uuid, 'source' => $import->mapping['source'], 'kind' => $raw['kind'],
@@ -154,7 +171,7 @@ final class InputImportService
     private function present(PayrollImport $import, $rows): array
     {
         return ['uuid' => $import->uuid, 'status' => $import->status, 'rows_total' => $import->rows_total, 'rows_ok' => $import->rows_ok, 'rows_error' => $import->rows_error, 'rows_duplicate' => $import->rows_duplicate,
-            'rows' => $rows->map(fn (PayrollImportRow $row) => ['row_number' => $row->row_number, 'status' => $row->status, 'errors' => $row->errors])->all()];
+            'mapping' => $import->mapping['columns'] ?? [], 'rows' => $rows->map(fn (PayrollImportRow $row) => ['row_number' => $row->row_number, 'status' => $row->status, 'errors' => $row->errors])->all()];
     }
 
     private function errorMessage(Throwable $error): string

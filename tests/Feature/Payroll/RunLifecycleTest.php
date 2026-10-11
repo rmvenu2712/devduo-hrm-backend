@@ -8,6 +8,7 @@ use App\Domain\Payroll\Contracts\Dto\PayrollInputLine;
 use App\Domain\Payroll\Contracts\Dto\PayrollInputQuery;
 use App\Domain\Payroll\Contracts\PayrollInputProvider;
 use App\Domain\Payroll\Integration\PayrollInputRegistry;
+use App\Domain\Payroll\Models\PayrollAdjustment;
 use App\Domain\Payroll\Models\PayrollCalculationResult;
 use App\Domain\Payroll\Models\PayrollLock;
 use App\Domain\Payroll\Models\PayrollRun;
@@ -225,5 +226,21 @@ class RunLifecycleTest extends TestCase
         $this->assertSame(1, $run->json('employees_failed'));
         $this->assertTrue(PayrollValidationIssue::where('code', 'no_compensation')->where('severity', 'blocking')->exists());
         $this->api($this->admin, 'POST', "runs/$uuid/submit")->assertStatus(422);
+    }
+
+    public function test_adjustments_are_idempotent_and_require_independent_approval(): void
+    {
+        $key = (string) Str::uuid();
+        $payload = ['employee_uuid' => $this->asha->uuid, 'kind' => 'retro', 'settlement_period_uuid' => $this->period->uuid, 'origin_period_uuid' => $this->period->uuid,
+            'component_code' => 'BASE', 'amount' => '125.25', 'reason' => 'Approved backdated salary change'];
+        $first = $this->api($this->admin, 'POST', 'adjustments', $payload, ['Idempotency-Key' => $key])->assertCreated()->assertJsonPath('status', 'pending')->json('uuid');
+        $this->api($this->admin, 'POST', 'adjustments', $payload, ['Idempotency-Key' => $key])->assertCreated()->assertJsonPath('uuid', $first);
+        $this->api($this->admin, 'POST', 'adjustments/'.$first.'/decision', ['decision' => 'approved'])->assertForbidden();
+        $this->api($this->checker, 'POST', 'adjustments/'.$first.'/decision', ['decision' => 'approved'])->assertOk()->assertJsonPath('status', 'approved');
+        $reversal = $this->api($this->admin, 'POST', 'adjustments/'.$first.'/reverse', ['settlement_period_uuid' => $this->period->uuid, 'reason' => 'Reverse duplicated retro amount'], ['Idempotency-Key' => (string) Str::uuid()])
+            ->assertCreated()->assertJsonPath('status', 'pending')->assertJsonPath('amount', '-125.2500')->assertJsonPath('reverses_uuid', $first)->json('uuid');
+        $this->api($this->checker, 'POST', 'adjustments/'.$reversal.'/decision', ['decision' => 'approved'])->assertOk()->assertJsonPath('status', 'approved');
+        $this->context($this->admin->tenant_id);
+        $this->assertSame('reversed', PayrollAdjustment::where('uuid', $first)->value('status'));
     }
 }

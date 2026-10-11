@@ -39,7 +39,9 @@ final class InputController
 
     public function previewImport(Request $r, InputImportService $imports)
     {
-        $data = $r->validate(['file' => 'required|file|max:10240', 'period_uuid' => 'required|uuid', 'source' => ['required', Rule::in(InputService::MANUAL_SOURCES)]]);
+        $data = $r->validate(['file' => 'required|file|max:10240', 'period_uuid' => 'required|uuid', 'source' => ['required', Rule::in(InputService::MANUAL_SOURCES)],
+            'mapping' => 'sometimes|array', 'mapping.employee_number' => 'sometimes|nullable|string|max:80', 'mapping.kind' => 'sometimes|nullable|string|max:80', 'mapping.component_code' => 'sometimes|nullable|string|max:80',
+            'mapping.amount' => 'sometimes|nullable|string|max:80', 'mapping.quantity' => 'sometimes|nullable|string|max:80']);
 
         return response()->json($imports->preview($r->user(), $data['file'], $data), 201);
     }
@@ -101,12 +103,21 @@ final class InputController
         return $this->presentAdjustment($this->runs->decideAdjustment($r->user(), $uuid, $d['decision']));
     }
 
+    public function reverseAdjustment(Request $r, string $uuid)
+    {
+        $key = $r->header('Idempotency-Key');
+        abort_unless(is_string($key) && preg_match('/^[0-9a-f-]{36}$/i', $key), 422, 'An Idempotency-Key header (UUID) is required.');
+        $data = $r->validate(['settlement_period_uuid' => 'required|uuid', 'reason' => 'required|string|min:5|max:1000']);
+
+        return response()->json($this->presentAdjustment($this->runs->reverseAdjustment($r->user(), $uuid, $data['settlement_period_uuid'], $data['reason'], $key)), 201);
+    }
+
     /** @return array<string,mixed> */
     private function presentAdjustment(PayrollAdjustment $a): array
     {
         $a->loadMissing('employee.person');
 
         return ['uuid' => $a->uuid, 'employee_uuid' => $a->employee->uuid, 'employee_name' => $a->employee->person->display_name, 'kind' => $a->kind, 'status' => $a->status, 'component_code' => $a->component_code,
-            'amount' => Decimal::str($a->amount, 4), 'currency' => $a->currency, 'reason' => $a->reason, 'trace' => $a->trace];
+            'amount' => Decimal::str($a->amount, 4), 'currency' => $a->currency, 'reason' => $a->reason, 'trace' => $a->trace, 'reverses_uuid' => $a->reverses_id ? PayrollAdjustment::query()->whereKey($a->reverses_id)->value('uuid') : null];
     }
 }

@@ -3,14 +3,23 @@
 namespace App\Http\Controllers\Recruitment;
 
 use App\Domain\Audit\Audit;
+use App\Domain\People\Models\Employee;
 use App\Domain\Recruitment\Contracts\CandidateChannelAdapter;
-use App\Domain\Recruitment\{HandoverService, HiringScope, InterviewService, OfferService, PipelineAnalytics};
-use App\Domain\Recruitment\Models\{Application, Candidate, Handover, Interview, Offer, Posting, Requisition};
+use App\Domain\Recruitment\HandoverService;
+use App\Domain\Recruitment\HiringScope;
+use App\Domain\Recruitment\InterviewService;
+use App\Domain\Recruitment\Models\Application;
+use App\Domain\Recruitment\Models\Handover;
+use App\Domain\Recruitment\Models\Interview;
+use App\Domain\Recruitment\Models\Offer;
+use App\Domain\Recruitment\Models\Posting;
+use App\Domain\Recruitment\Models\Requisition;
+use App\Domain\Recruitment\OfferService;
+use App\Domain\Recruitment\PipelineAnalytics;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
-use Illuminate\Validation\ValidationException;
 
 final class RecruitmentCoreController
 {
@@ -22,6 +31,7 @@ final class RecruitmentCoreController
         $req->update(['status' => 'closed', 'closed_at' => now()]);
         Posting::where('requisition_id', $req->id)->where('status', 'published')->update(['status' => 'closed']);
         Audit::record('requisition.closed', 'recruitment', $req->uuid);
+
         return ['uuid' => $req->uuid, 'status' => $req->status];
     }
 
@@ -40,6 +50,7 @@ final class RecruitmentCoreController
         unset($d['requisition_uuid']);
         $p = Posting::create($d + ['requisition_id' => $req->id, 'created_by' => $r->user()->id]);
         Audit::record('posting.created', 'recruitment', $p->uuid);
+
         return response()->json(['uuid' => $p->uuid], 201);
     }
 
@@ -66,6 +77,7 @@ final class RecruitmentCoreController
             $p->update(['status' => 'closed']);
         }
         Audit::record('posting.'.$to, 'recruitment', $p->uuid);
+
         return ['uuid' => $p->uuid, 'status' => $p->status];
     }
 
@@ -74,13 +86,14 @@ final class RecruitmentCoreController
     {
         $c = app(HiringScope::class)->candidates($r->user(), 'recruitment.privacy.manage')->where('uuid', $uuid)->firstOrFail();
         abort_if($c->anonymized_at, 409, 'This candidate is already anonymized.');
-        abort_if($c->retention_until >= now('UTC')->toDateString() && !$r->boolean('erasure_request'), 409, 'The retention period has not ended. Confirm an erasure request to anonymize earlier.');
+        abort_if($c->retention_until >= now('UTC')->toDateString() && ! $r->boolean('erasure_request'), 409, 'The retention period has not ended. Confirm an erasure request to anonymize earlier.');
         abort_if(Application::where('candidate_id', $c->id)->whereNotNull('employee_id')->exists(), 409, 'Hired applicants are retained through the employee record.');
         DB::transaction(function () use ($c) {
             $c->update(['name' => 'Anonymized applicant', 'email' => 'anonymized-'.$c->uuid.'@invalid.local', 'email_hash' => hash('sha256', $c->uuid), 'phone' => null, 'consent_reference' => 'removed', 'anonymized_at' => now()]);
             Application::where('candidate_id', $c->id)->where('status', 'active')->update(['status' => 'withdrawn', 'closed_at' => now()]);
             Audit::record('candidate.anonymized', 'recruitment', $c->uuid);
         });
+
         return ['uuid' => $c->uuid, 'anonymized' => true];
     }
 
@@ -88,7 +101,10 @@ final class RecruitmentCoreController
     public function interviews(Request $r, HiringScope $scope)
     {
         $q = $scope->interviews($r->user())->with('application.candidate')->orderBy('starts_at');
-        if ($r->filled('application_uuid')) $q->whereIn('application_id', Application::where('uuid', $r->query('application_uuid'))->select('id'));
+        if ($r->filled('application_uuid')) {
+            $q->whereIn('application_id', Application::where('uuid', $r->query('application_uuid'))->select('id'));
+        }
+
         return $q->paginate(25)->through(fn ($i) => $this->interview($i));
     }
 
@@ -96,7 +112,16 @@ final class RecruitmentCoreController
     {
         $d = $r->validate(['application_uuid' => 'required|uuid', 'round' => 'required|string|max:80', 'starts_at' => 'required|date_format:Y-m-d\TH:i', 'ends_at' => 'required|date_format:Y-m-d\TH:i', 'timezone' => 'required|timezone',
             'mode' => ['nullable', Rule::in(['video', 'phone', 'onsite'])], 'location_text' => 'nullable|string|max:255', 'panelist_ids' => 'required|array|min:1|max:10', 'panelist_ids.*' => 'integer']);
+
         return response()->json(['uuid' => $service->schedule($r->user(), $d)->uuid], 201);
+    }
+
+    public function rescheduleInterview(Request $r, string $uuid, InterviewService $service)
+    {
+        $data = $r->validate(['starts_at' => 'required|date_format:Y-m-d\TH:i', 'ends_at' => 'required|date_format:Y-m-d\TH:i', 'timezone' => 'required|timezone',
+            'expected_starts_at' => 'required|date', 'reason' => 'required|string|max:1000']);
+
+        return $this->interview($service->reschedule($r->user(), $uuid, $data));
     }
 
     public function cancelInterview(Request $r, string $uuid, InterviewService $service)
@@ -108,6 +133,7 @@ final class RecruitmentCoreController
     {
         $d = $r->validate(['rating' => 'required|integer|between:1,5', 'recommendation' => ['required', Rule::in(['strong_yes', 'yes', 'no', 'strong_no'])], 'strengths' => 'nullable|string|max:4000', 'concerns' => 'nullable|string|max:4000']);
         $service->submitScorecard($r->user(), $uuid, $d);
+
         return response()->json(['submitted' => true], 201);
     }
 
@@ -115,6 +141,7 @@ final class RecruitmentCoreController
     {
         $i = $scope->interviews($r->user())->where('uuid', $uuid)->firstOrFail();
         Audit::record('scorecards.viewed', 'recruitment', $i->uuid);
+
         return ['data' => $service->scorecardsFor($r->user(), $i)];
     }
 
@@ -128,7 +155,10 @@ final class RecruitmentCoreController
     public function offers(Request $r, HiringScope $scope)
     {
         $q = Offer::whereIn('application_id', $scope->applications($r->user(), 'recruitment.offer.manage')->select('id'))->with('application.candidate')->latest('id');
-        if ($r->filled('application_uuid')) $q->whereIn('application_id', Application::where('uuid', $r->query('application_uuid'))->select('id'));
+        if ($r->filled('application_uuid')) {
+            $q->whereIn('application_id', Application::where('uuid', $r->query('application_uuid'))->select('id'));
+        }
+
         return $q->paginate(25)->through(fn ($o) => $this->offer($o, $r->user()));
     }
 
@@ -136,8 +166,11 @@ final class RecruitmentCoreController
     {
         $d = $r->validate(['application_uuid' => 'required|uuid', 'job_title' => 'required|string|max:160', 'start_date' => 'required|date_format:Y-m-d|after_or_equal:today', 'expires_on' => 'nullable|date_format:Y-m-d|after_or_equal:today|before_or_equal:start_date',
             'compensation_reference' => 'nullable|string|max:1000', 'currency' => 'nullable|alpha|size:3', 'notes' => 'nullable|string|max:4000', 'benchmark_employee_uuid' => 'nullable|uuid']);
-        if (isset($d['currency'])) $d['currency'] = strtoupper($d['currency']);
+        if (isset($d['currency'])) {
+            $d['currency'] = strtoupper($d['currency']);
+        }
         $o = $service->create($r->user(), $d['application_uuid'], $d);
+
         return response()->json(['uuid' => $o->uuid, 'version' => $o->version], 201);
     }
 
@@ -152,6 +185,7 @@ final class RecruitmentCoreController
             'decline' => $service->respond($r->user(), $uuid, 'declined'),
             'withdraw' => $service->withdraw($r->user(), $uuid),
         };
+
         return ['uuid' => $o->uuid, 'status' => $o->status];
     }
 
@@ -168,10 +202,12 @@ final class RecruitmentCoreController
     {
         $d = $r->validate(['employee_number' => 'nullable|string|max:40', 'work_email' => 'nullable|email|max:254', 'worker_type' => ['nullable', Rule::in(['employee', 'contractor', 'intern'])], 'probation_applicable' => 'boolean', 'date_of_birth' => 'nullable|date_format:Y-m-d|before:today',
             'manager_uuid' => 'nullable|uuid', 'confirm_duplicates' => 'boolean',
+            'previous_employee_uuid' => 'nullable|uuid', 'rehire_identity_confirmed' => 'exclude_without:previous_employee_uuid|required|accepted', 'override_reason' => 'nullable|string|max:1000',
             'assignment' => 'required|array', 'assignment.department_id' => 'required|integer', 'assignment.designation_id' => 'required|integer', 'assignment.employee_type_id' => 'required|integer', 'assignment.location_id' => 'required|integer',
             'assignment.legal_entity_id' => 'nullable|integer', 'assignment.position_id' => 'nullable|integer', 'assignment.grade_id' => 'nullable|integer', 'assignment.level_id' => 'nullable|integer', 'assignment.work_mode' => ['nullable', Rule::in(['onsite', 'remote', 'hybrid'])]]);
         $h = $service->handover($r->user(), $uuid, $d);
-        $employee = \App\Domain\People\Models\Employee::findOrFail($h->employee_id);
+        $employee = Employee::findOrFail($h->employee_id);
+
         return response()->json(['employee_uuid' => $employee->uuid, 'employee_number' => $employee->employee_number, 'status' => $employee->status], 201);
     }
 

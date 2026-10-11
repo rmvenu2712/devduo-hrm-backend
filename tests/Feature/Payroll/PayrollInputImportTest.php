@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Payroll;
 
+use App\Domain\Payroll\Models\PayrollImportRow;
 use App\Domain\Payroll\Models\PayrollInput;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -44,5 +45,27 @@ class PayrollInputImportTest extends TestCase
         $this->postJson('/api/v1/payroll/inputs/imports/'.$preview['uuid'].'/commit')->assertOk()->assertJsonPath('rows_ok', 1);
         $this->context($this->admin->tenant_id);
         $this->assertSame(1, PayrollInput::count());
+    }
+
+    public function test_input_import_accepts_explicit_header_mapping_and_keeps_original_source_row(): void
+    {
+        $employee = $this->hire('Mina Shah');
+        $group = $this->payrollGroup();
+        $period = $this->payrollPeriod($group);
+        $content = "Staff ID,Input Type,Pay Code,Value\n{$employee->employee_number},commission,SALES_COMMISSION,240.50\n";
+        $preview = $this->postJson('/api/v1/payroll/inputs/imports/preview', [
+            'file' => UploadedFile::fake()->createWithContent('commission.csv', $content),
+            'period_uuid' => $period->uuid,
+            'source' => 'commission',
+            'mapping' => ['employee_number' => 'Staff ID', 'kind' => 'Input Type', 'component_code' => 'Pay Code', 'amount' => 'Value', 'quantity' => ''],
+        ])->assertCreated()->assertJsonPath('rows_ok', 1)->assertJsonPath('mapping.employee_number', 'staff_id')->json();
+
+        $this->postJson('/api/v1/payroll/inputs/imports/'.$preview['uuid'].'/commit')->assertOk()->assertJsonPath('rows_ok', 1);
+        $this->context($this->admin->tenant_id);
+        $input = PayrollInput::firstOrFail();
+        $this->assertSame('SALES_COMMISSION', $input->component_code);
+        $importRow = PayrollImportRow::query()->where('import_id', $input->import_id)->firstOrFail();
+        $this->assertSame($employee->employee_number, $importRow->raw['source_row']['Staff ID']);
+        $this->assertSame($employee->employee_number, $importRow->raw['values']['employee_number']);
     }
 }

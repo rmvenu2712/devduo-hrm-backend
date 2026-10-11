@@ -44,3 +44,4 @@ Route::delete('inputs/{uuid}', [InputController::class, 'void'])->middleware('pe
 Route::get('adjustments', [InputController::class, 'adjustments'])->middleware('permission:payroll.adjust|payroll.adjust.approve');
 Route::post('adjustments', [InputController::class, 'storeAdjustment'])->middleware('permission:payroll.adjust');
 Route::post('adjustments/{uuid}/decision', [InputController::class, 'decideAdjustment'])->middleware('permission:payroll.adjust.approve');
+Route::post('adjustments/{uuid}/reverse', [InputController::class, 'reverseAdjustment'])->middleware('permission:payroll.adjust');

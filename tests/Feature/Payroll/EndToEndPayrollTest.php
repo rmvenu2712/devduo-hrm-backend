@@ -7,10 +7,14 @@ use App\Domain\Payroll\Contracts\CompensationResolver;
 use App\Domain\Payroll\Contracts\EmployeeCalculator;
 use App\Domain\Payroll\Contracts\PackResolver;
 use App\Domain\Payroll\Contracts\ResultStore;
+use App\Domain\Payroll\Loans\LoanService;
+use App\Domain\Payroll\Models\BenefitPlan;
+use App\Domain\Payroll\Models\EmployeeBenefitEnrollment;
 use App\Domain\Payroll\Models\EmployeeLoan;
 use App\Domain\Payroll\Models\LoanInstallment;
 use App\Domain\Payroll\Models\PayrollCalculationResult;
 use App\Domain\Payroll\Models\PayrollRun;
+use App\Domain\Payroll\Support\Decimal;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
@@ -86,6 +90,14 @@ class EndToEndPayrollTest extends TestCase
             $this->as($admin, 'POST', "compensation/compensations/$c/decision", ['decision' => 'approved'], [], 403); // maker cannot approve
             $this->as($checker, 'POST', "compensation/compensations/$c/decision", ['decision' => 'approved'], [], 200);
         }
+
+        // Fixed benefit contributions flow into the calculation with effective-date proration.
+        $benefitPlan = $this->as($admin, 'POST', 'benefits/plans', ['code' => 'HEALTH_CORE', 'name' => 'Health Plan', 'category' => 'insurance', 'currency' => 'INR',
+            'effective_from' => '2026-01-01', 'component_code' => 'HEALTH', 'contributions' => ['employee_fixed' => '300.00', 'employer_fixed' => '600.00']], [], 201)->json('uuid');
+        $this->as($admin, 'POST', "benefits/plans/$benefitPlan/activate", [], [], 200);
+        $plan = BenefitPlan::where('uuid', $benefitPlan)->firstOrFail();
+        EmployeeBenefitEnrollment::create(['employee_id' => $asha->id, 'plan_id' => $plan->id, 'status' => 'active', 'effective_from' => '2026-09-16',
+            'employee_contribution' => '300.00', 'employer_contribution' => '600.00', 'created_by' => $admin->id]);
         $resolved = app(CompensationResolver::class)->current($asha->id, '2026-09-30');
         $this->assertSame('70000.00', $resolved['gross_reference']);
         $this->assertNotNull(app(PackResolver::class)->forGroup(DB::table('payroll_groups')->where('uuid', $group)->value('id'), '2026-09-30'));
@@ -115,6 +127,8 @@ class EndToEndPayrollTest extends TestCase
         $this->assertSame('50000.0000', $codes['BASE']);
         $this->assertSame('20000.0000', $codes['HRA']);
         $this->assertSame('1000.0000', $codes['LOAN_RECOVERY'], 'loan installment feeds the run through LoanService::dueFor');
+        $this->assertSame('150.0000', $codes['HEALTH_EE'], 'employee contribution is prorated for the 15 covered days');
+        $this->assertSame('300.0000', $codes['HEALTH_ER'], 'employer contribution is prorated for the 15 covered days');
         $this->assertSame('500.0000', $codes['TRAVEL']);
         $this->assertSame('70000.0000', $ashaResult['gross']);
         foreach (['gross', 'net'] as $field) {
@@ -147,13 +161,13 @@ class EndToEndPayrollTest extends TestCase
         $this->assertSame('locked', $run->status);
         $inst = LoanInstallment::where('sequence', 1)->first();
         $this->assertSame('recovered', $inst->status, 'LoanService::consume ran at lock');
-        $this->assertSame('2000.0000', app(\App\Domain\Payroll\Loans\LoanService::class)->outstanding('loan', EmployeeLoan::first()->id));
+        $this->assertSame('2000.0000', app(LoanService::class)->outstanding('loan', EmployeeLoan::first()->id));
 
         // reopen releases the recovery, then the cycle is repeated
         $this->as($admin, 'POST', "payroll/runs/$runUuid/reopen-request", ['reason' => 'Late correction to the inputs'], [], 200);
         $this->as($checker, 'POST', "payroll/runs/$runUuid/reopen-decision", ['decision' => 'approved'], [], 200);
         $this->assertSame('scheduled', LoanInstallment::where('sequence', 1)->value('status'), 'LoanService::release ran on reopen');
-        $this->assertSame('3000.0000', app(\App\Domain\Payroll\Loans\LoanService::class)->outstanding('loan', EmployeeLoan::first()->id));
+        $this->assertSame('3000.0000', app(LoanService::class)->outstanding('loan', EmployeeLoan::first()->id));
         $this->as($admin, 'POST', "payroll/runs/$runUuid/calculate", [], [], 202);
         $this->assertSame('review', $this->as($admin, 'GET', "payroll/runs/$runUuid/progress", [], [], 200)->json('status'));
         $this->as($admin, 'POST', "payroll/runs/$runUuid/validate", [], [], 200);
@@ -208,7 +222,7 @@ class EndToEndPayrollTest extends TestCase
         $ex = $this->as($admin, 'GET', "payroll/explain/employees/{$asha->uuid}?run=$runUuid&purpose_code=payroll_processing", [], [], 200)->json();
         $this->assertTrue($ex['reconciles']);
         $this->assertTrue($ex['reproducible']);
-        $this->assertSame(Decimal4::of($ashaResult["net"]), Decimal4::of($ex["totals"]["net"]), "explainer reports the currency exponent (2dp), equal in value to the stored 4dp net");
+        $this->assertSame(Decimal4::of($ashaResult['net']), Decimal4::of($ex['totals']['net']), 'explainer reports the currency exponent (2dp), equal in value to the stored 4dp net');
 
         // ---- tenant isolation ----------------------------------------------------------------------------------------------
         $beta = app(WorkspaceProvisioner::class)->create('Beta', 'beta', 'admin@beta.test', 'StrongPassword123');
@@ -223,6 +237,6 @@ final class Decimal4
 {
     public static function of(string $v): string
     {
-        return \App\Domain\Payroll\Support\Decimal::str($v, 4);
+        return Decimal::str($v, 4);
     }
 }

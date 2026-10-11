@@ -3,6 +3,7 @@
 namespace App\Domain\Recruitment;
 
 use App\Domain\Notifications\NotificationService;
+use App\Domain\Tenancy\TenantContext;
 use App\Domain\Work\TaskService;
 use App\Models\User;
 
@@ -22,6 +23,6 @@ final class RecruitmentNotify
     /** Active users holding a permission, excluding one user (maker-checker). */
     public static function holders(string $permission, ?int $except = null)
     {
-        return User::where('active', true)->when($except, fn ($q) => $q->where('id', '!=', $except))->whereHas('roles.permissions', fn ($q) => $q->where('key', $permission))->get();
+        return User::where('tenant_id', app(TenantContext::class)->id)->where('active', true)->when($except, fn ($q) => $q->where('id', '!=', $except))->whereHas('roles.permissions', fn ($q) => $q->where('key', $permission))->get();
     }
 }

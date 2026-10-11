@@ -15,7 +15,7 @@ Artisan::command('hrm:workspace {slug} {email} {--name=My Company}', function (W
             $this->error($error);
         }
 
-return 1;
+        return 1;
     }
     $provisioner->create($this->option('name'), $data['slug'], $data['email'], $password);
     $this->info('Workspace created. Sign in with your workspace slug and administrator email.');
@@ -33,6 +33,7 @@ Schedule::command('people:scan-quality')->dailyAt('01:00');
 Schedule::command('lifecycle:remind')->dailyAt('07:00');
 Schedule::command('lifecycle:housekeeping')->dailyAt('00:30');
 Schedule::command('performance:remind')->dailyAt('07:30');
+Schedule::command('recruitment:housekeeping')->hourly()->withoutOverlapping();
 Schedule::command('attendance:process-nightly')->dailyAt('01:30');
 Schedule::command('attendance:expire-requests')->dailyAt('01:00');
 Schedule::command('attendance:send-reminders')->everyFifteenMinutes();

@@ -4,8 +4,16 @@ namespace Tests\Feature\Recruitment;
 
 use App\Domain\Access\WorkspaceProvisioner;
 use App\Domain\People\Models\Employee;
-use App\Domain\Recruitment\Operations\{RecruitmentEmployee360Provider, RecruitmentInsightProvider, RecruitmentQualityRules};
-use App\Models\{Permission, Role, User};
+use App\Domain\Recruitment\Operations\RecruitmentEmployee360Provider;
+use App\Domain\Recruitment\Operations\RecruitmentInsightProvider;
+use App\Domain\Recruitment\Operations\RecruitmentQualityRules;
+use App\Domain\Recruitment\RecruitmentHousekeeping;
+use App\Domain\Recruitment\RecruitmentNotify;
+use App\Models\Permission;
+use App\Models\Role;
+use App\Models\Tenant;
+use App\Models\User;
+use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -14,7 +22,7 @@ use Tests\TestCase;
 
 class RecruitmentCoreTest extends TestCase
 {
-    use RefreshDatabase, PeopleFixtures;
+    use PeopleFixtures, RefreshDatabase;
 
     private User $checker;
 
@@ -136,6 +144,52 @@ class RecruitmentCoreTest extends TestCase
         $this->assertSame($count + 1, Employee::count());
     }
 
+    public function test_rehire_handover_preserves_person_and_requires_identity_and_eligibility_review(): void
+    {
+        $former = $this->hire('Asha Rao', ['personal_email' => 'asha@example.test']);
+        $offer = $this->acceptedOffer($this->applicationAtOffer($this->requisition(), $this->candidate()));
+        $path = '/api/v1/recruitment/offers/'.$offer.'/handover';
+        $body = $this->handoverPayload(['previous_employee_uuid' => $former->uuid]);
+        $this->postJson($path, $body)->assertUnprocessable()->assertJsonValidationErrors('rehire_identity_confirmed');
+        $body['rehire_identity_confirmed'] = true;
+        $this->postJson($path, $body)->assertUnprocessable(); // current employment cannot be rehired
+        $this->postJson('/api/v1/employees/'.$former->uuid.'/separation', ['type' => 'contract_end', 'last_working_date' => '2026-10-07', 'rehire_eligible' => false])->assertCreated();
+        $this->postJson('/api/v1/employees/'.$former->uuid.'/separation/complete')->assertOk();
+        $this->postJson($path, $body)->assertUnprocessable()->assertJsonValidationErrors('override_reason');
+        $this->context($this->admin->tenant_id);
+        $people = DB::table('people')->where('tenant_id', $this->admin->tenant_id)->count();
+        $body['override_reason'] = 'Eligibility reviewed for the new position';
+        $result = $this->postJson($path, $body)->assertCreated()->json('employee_uuid');
+        $this->postJson($path, $body)->assertCreated()->assertJsonPath('employee_uuid', $result);
+        $this->context($this->admin->tenant_id);
+        $new = Employee::where('uuid', $result)->firstOrFail();
+        $this->assertSame($former->person_id, $new->person_id);
+        $this->assertSame($former->id, $new->rehire_of_id);
+        $this->assertSame(2, $new->employment_sequence);
+        $this->assertSame($people, DB::table('people')->where('tenant_id', $this->admin->tenant_id)->count());
+        $this->assertDatabaseHas('recruitment_handovers', ['employee_id' => $new->id, 'person_id' => $former->person_id]);
+        $this->assertDatabaseHas('audit_logs', ['action' => 'rehired']);
+    }
+
+    public function test_rehire_handover_checks_permission_and_employee_scope(): void
+    {
+        $former = $this->hire('Asha Rao', ['personal_email' => 'asha@example.test']);
+        $offer = $this->acceptedOffer($this->applicationAtOffer($this->requisition(), $this->candidate()));
+        $this->context($this->admin->tenant_id);
+        $role = Role::create(['name' => 'Restricted hiring converter', 'data_scope' => 'tenant', 'system' => false]);
+        $role->permissions()->sync(Permission::whereIn('key', ['recruitment.handover', 'people.manage'])->pluck('id'));
+        $this->checker->roles()->sync([$role->id]);
+        $body = $this->handoverPayload(['previous_employee_uuid' => $former->uuid, 'rehire_identity_confirmed' => true]);
+        $path = '/api/v1/recruitment/offers/'.$offer.'/handover';
+        $this->signIn($this->checker)->postJson($path, $body)->assertForbidden();
+        $this->context($this->admin->tenant_id);
+        $scoped = Role::create(['name' => 'Scoped rehire', 'data_scope' => 'self', 'system' => false]);
+        $scoped->permissions()->sync(Permission::where('key', 'people.rehire')->pluck('id'));
+        $this->checker->roles()->attach($scoped->id);
+        $this->signIn($this->checker)->postJson($path, $body)->assertNotFound();
+        $this->signIn($this->admin)->postJson($path, array_replace($body, ['previous_employee_uuid' => (string) Str::uuid()]))->assertNotFound();
+    }
+
     public function test_offer_versioning_and_state_rules(): void
     {
         $app = $this->applicationAtOffer($this->requisition(), $this->candidate());
@@ -155,9 +209,13 @@ class RecruitmentCoreTest extends TestCase
         $role = Role::create(['name' => 'Panelist', 'description' => 'Interview panel', 'data_scope' => 'self', 'system' => false]);
         $role->permissions()->sync([$view->id]);
         $p1 = new User(['name' => 'Panel One', 'email' => 'p1@alpha.test', 'password' => 'StrongPassword123']);
-        $p1->tenant_id = $this->admin->tenant_id; $p1->save(); $p1->roles()->attach($role->id);
+        $p1->tenant_id = $this->admin->tenant_id;
+        $p1->save();
+        $p1->roles()->attach($role->id);
         $p2 = new User(['name' => 'Panel Two', 'email' => 'p2@alpha.test', 'password' => 'StrongPassword123']);
-        $p2->tenant_id = $this->admin->tenant_id; $p2->save(); $p2->roles()->attach($role->id);
+        $p2->tenant_id = $this->admin->tenant_id;
+        $p2->save();
+        $p2->roles()->attach($role->id);
 
         $this->signIn($p1)->getJson('/api/v1/recruitment/applications')->assertOk()->assertJsonCount(0, 'data'); // not on the panel yet
         $this->signIn($this->admin);
@@ -185,7 +243,9 @@ class RecruitmentCoreTest extends TestCase
         $this->context($this->admin->tenant_id);
         $member = $this->userWithRole('Team member', 'member@alpha.test');
         $this->signIn($member);
-        foreach (['offers', 'analytics', 'interviews', 'postings'] as $path) $this->getJson('/api/v1/recruitment/'.$path)->assertForbidden();
+        foreach (['offers', 'analytics', 'interviews', 'postings'] as $path) {
+            $this->getJson('/api/v1/recruitment/'.$path)->assertForbidden();
+        }
         $this->postJson('/api/v1/recruitment/offers/'.$offer.'/handover', $this->handoverPayload())->assertForbidden();
 
         $other = $this->bootTenant('beta');
@@ -194,6 +254,39 @@ class RecruitmentCoreTest extends TestCase
         $this->postJson('/api/v1/recruitment/offers/'.$offer.'/handover', $this->handoverPayload(['assignment' => ['department_id' => $this->org['department'][0], 'designation_id' => $this->org['designation'][0], 'employee_type_id' => $this->org['employee_type'][0], 'location_id' => $this->org['location'][0]]]))->assertNotFound();
         $this->postJson('/api/v1/recruitment/offers/'.$offer.'/withdraw')->assertNotFound();
         $this->assertSame(0, $this->getJson('/api/v1/recruitment/analytics')->json('requisitions.filled'));
+    }
+
+    public function test_interview_rescheduling_preserves_panel_tasks_and_checks_conflicts_and_stale_edits(): void
+    {
+        $app = $this->applicationAtOffer($this->requisition(), $this->candidate());
+        $schedule = ['application_uuid' => $app, 'round' => 'Technical', 'starts_at' => '2026-10-08T10:00', 'ends_at' => '2026-10-08T11:00', 'timezone' => 'Asia/Kolkata', 'panelist_ids' => [$this->checker->id]];
+        $id = $this->postJson('/api/v1/recruitment/interviews', $schedule)->assertCreated()->json('uuid');
+        $this->postJson('/api/v1/recruitment/interviews', array_replace($schedule, ['starts_at' => '2026-10-09T10:00', 'ends_at' => '2026-10-09T11:00']))->assertCreated();
+        $path = '/api/v1/recruitment/interviews/'.$id.'/reschedule';
+        $move = ['starts_at' => '2026-10-09T10:30', 'ends_at' => '2026-10-09T11:30', 'timezone' => 'Asia/Kolkata', 'expected_starts_at' => '2026-10-08T04:30:00Z', 'reason' => 'Candidate availability changed'];
+        $this->postJson($path, $move)->assertUnprocessable();
+        $move['starts_at'] = '2026-10-09T14:00';
+        $move['ends_at'] = '2026-10-09T15:00';
+        $this->postJson($path, $move)->assertOk()->assertJsonPath('starts_at', '2026-10-09T08:30:00+00:00');
+        $this->postJson($path, $move)->assertConflict();
+        $this->assertSame(1, DB::table('work_items')->where('source_entity', 'scorecard:'.$id.':'.$this->checker->id)->where('status', 'open')->count());
+        $this->assertDatabaseHas('audit_logs', ['action' => 'interview.rescheduled', 'resource' => $id]);
+        $this->context($this->admin->tenant_id);
+        $this->signIn($this->userWithRole('Team member', 'member@alpha.test'))->postJson($path, $move)->assertForbidden();
+        $other = app(WorkspaceProvisioner::class)->create('Other tenant', 'other-interviews', 'admin@other-interviews.test', 'StrongPassword123');
+        $this->signIn($other)->postJson($path, $move)->assertNotFound();
+        $this->signIn($this->admin)->postJson('/api/v1/recruitment/interviews', array_replace($schedule, ['panelist_ids' => [$other->id]]))->assertUnprocessable();
+        $this->postJson('/api/v1/recruitment/interviews/'.$id.'/cancel')->assertOk();
+        $this->postJson($path, array_replace($move, ['expected_starts_at' => '2026-10-09T08:30:00Z']))->assertConflict();
+        $this->assertDatabaseHas('work_items', ['source_entity' => 'scorecard:'.$id.':'.$this->checker->id, 'status' => 'completed']);
+    }
+
+    public function test_recruitment_notification_holders_do_not_cross_tenants(): void
+    {
+        $other = app(WorkspaceProvisioner::class)->create('Other tenant', 'other-notices', 'admin@other-notices.test', 'StrongPassword123');
+        $this->signIn($this->admin);
+        $this->acceptedOffer($this->applicationAtOffer($this->requisition(), $this->candidate()));
+        $this->assertNotContains($other->id, RecruitmentNotify::holders('recruitment.handover')->pluck('id')->all());
     }
 
     public function test_candidate_duplicates_masking_and_anonymization(): void
@@ -211,6 +304,63 @@ class RecruitmentCoreTest extends TestCase
         $this->postJson('/api/v1/recruitment/candidates/'.$uuid.'/anonymize', ['erasure_request' => true])->assertOk();
         $this->assertDatabaseHas('recruitment_candidates', ['uuid' => $uuid, 'name' => 'Anonymized applicant']);
         $this->assertNotNull($viewer);
+    }
+
+    public function test_housekeeping_expires_local_records_and_sends_reminders_once(): void
+    {
+        $req = $this->requisition(3);
+        $app = $this->applicationAtOffer($req, $this->candidate());
+        $offer = $this->postJson('/api/v1/recruitment/offers', ['application_uuid' => $app, 'job_title' => 'Engineer', 'start_date' => '2026-11-02', 'expires_on' => '2026-10-08'])->assertCreated()->json('uuid');
+        $this->postJson('/api/v1/recruitment/offers/'.$offer.'/submit')->assertOk();
+        $posting = $this->postJson('/api/v1/recruitment/postings', ['requisition_uuid' => $req, 'title' => 'Engineer', 'description' => 'Join us', 'channel' => 'internal', 'closes_on' => '2026-10-08'])->assertCreated()->json('uuid');
+        $this->postJson('/api/v1/recruitment/postings/'.$posting.'/publish')->assertOk();
+        $interview = $this->postJson('/api/v1/recruitment/interviews', ['application_uuid' => $app, 'round' => 'Technical', 'starts_at' => '2026-10-08T10:00', 'ends_at' => '2026-10-08T11:00', 'timezone' => 'UTC', 'panelist_ids' => [$this->checker->id]])->assertCreated()->json('uuid');
+        $acceptedApp = $this->applicationAtOffer($req, $this->candidate('second@example.test'));
+        $accepted = $this->acceptedOffer($acceptedApp);
+        DB::table('recruitment_offers')->where('uuid', $accepted)->update(['expires_on' => '2026-10-08']);
+        $this->travelTo(CarbonImmutable::parse('2026-10-08T12:00:00Z'));
+        $this->artisan('recruitment:housekeeping', ['--tenant' => $this->admin->tenant_id])->assertSuccessful();
+        $this->assertDatabaseHas('recruitment_offers', ['uuid' => $offer, 'status' => 'pending_approval']);
+        $this->travelTo(CarbonImmutable::parse('2026-11-08T12:00:00Z'));
+        $this->artisan('recruitment:housekeeping', ['--tenant' => $this->admin->tenant_id])->assertSuccessful();
+        $this->assertDatabaseHas('recruitment_offers', ['uuid' => $offer, 'status' => 'expired']);
+        $this->assertDatabaseHas('recruitment_offers', ['uuid' => $accepted, 'status' => 'accepted']);
+        $this->assertDatabaseHas('recruitment_postings', ['uuid' => $posting, 'status' => 'closed']);
+        $this->assertDatabaseHas('work_items', ['source_entity' => 'offer:'.$offer, 'status' => 'completed']);
+        $this->assertDatabaseHas('audit_logs', ['action' => 'application.stage_reminded', 'resource' => $app]);
+        $this->assertDatabaseHas('audit_logs', ['action' => 'interview.feedback_reminded', 'resource' => $interview]);
+        $count = DB::table('audit_logs')->whereIn('action', ['application.stage_reminded', 'interview.feedback_reminded', 'offer.expired', 'posting.expired'])->count();
+        $this->artisan('recruitment:housekeeping', ['--tenant' => $this->admin->tenant_id])->assertSuccessful();
+        $this->assertSame($count, DB::table('audit_logs')->whereIn('action', ['application.stage_reminded', 'interview.feedback_reminded', 'offer.expired', 'posting.expired'])->count());
+    }
+
+    public function test_housekeeping_skips_closed_and_privacy_restricted_applications_and_disabled_tenants(): void
+    {
+        $req = $this->requisition();
+        $candidate = $this->candidate();
+        $app = $this->applicationAtOffer($req, $candidate);
+        $interview = $this->postJson('/api/v1/recruitment/interviews', ['application_uuid' => $app, 'round' => 'Technical', 'starts_at' => '2026-10-08T10:00', 'ends_at' => '2026-10-08T11:00', 'timezone' => 'UTC', 'panelist_ids' => [$this->checker->id]])->assertCreated()->json('uuid');
+        $this->travelTo(CarbonImmutable::parse('2026-11-08T12:00:00Z'));
+        $this->context($this->admin->tenant_id);
+        $housekeeping = app(RecruitmentHousekeeping::class);
+        DB::table('recruitment_applications')->where('uuid', $app)->update(['status' => 'withdrawn']);
+        $this->assertSame(0, array_sum($housekeeping->run()));
+        DB::table('recruitment_applications')->where('uuid', $app)->update(['status' => 'active']);
+        DB::table('recruitment_candidates')->where('uuid', $candidate)->update(['retention_until' => '2026-11-01']);
+        $this->assertSame(0, array_sum($housekeeping->run()));
+        DB::table('recruitment_candidates')->where('uuid', $candidate)->update(['retention_until' => '2027-04-01', 'anonymized_at' => now()]);
+        $this->assertSame(0, array_sum($housekeeping->run()));
+        DB::table('recruitment_candidates')->where('uuid', $candidate)->update(['anonymized_at' => null]);
+        DB::table('users')->whereIn('id', [$this->admin->id, $this->checker->id])->update(['active' => false]);
+        $this->assertSame(0, array_sum($housekeeping->run()));
+        DB::table('users')->whereIn('id', [$this->admin->id, $this->checker->id])->update(['active' => true]);
+        $tenant = Tenant::findOrFail($this->admin->tenant_id);
+        $settings = $tenant->settings;
+        $settings['modules'] = array_values(array_diff($settings['modules'], ['recruitment']));
+        $tenant->update(['settings' => $settings]);
+        $this->artisan('recruitment:housekeeping', ['--tenant' => $tenant->id])->assertSuccessful();
+        $this->assertDatabaseMissing('audit_logs', ['action' => 'interview.feedback_reminded', 'resource' => $interview]);
+        $this->assertDatabaseMissing('audit_logs', ['action' => 'application.stage_reminded', 'resource' => $app]);
     }
 
     public function test_postings_requisition_budget_and_registries(): void

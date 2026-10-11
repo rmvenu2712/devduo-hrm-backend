@@ -4,7 +4,9 @@ namespace App\Domain\Payroll\Engine;
 
 use App\Domain\Payroll\Contracts\CompensationResolver;
 use App\Domain\Payroll\Contracts\PackResolver;
+use App\Domain\Payroll\Loans\LoanService;
 use App\Domain\Payroll\Models\CountryPack;
+use App\Domain\Payroll\Models\EmployeeBenefitEnrollment;
 use App\Domain\Payroll\Models\PayrollRun;
 use App\Domain\Payroll\Models\PayrollRunEmployee;
 use App\Domain\Payroll\Support\Decimal;
@@ -58,15 +60,35 @@ final class RequestBuilder
 
         $loans = [];
         if ($run->run_type === 'regular') {
-            foreach (app(\App\Domain\Payroll\Loans\LoanService::class)->dueFor($re->employee_id, $end) as $due) {
+            foreach (app(LoanService::class)->dueFor($re->employee_id, $end) as $due) {
                 $loans[] = ['id' => (int) ($due['installment_id'] ?? 0), 'amount' => Decimal::str($due['amount'], 4), 'component_code' => $due['component_code'], 'reference' => $due['reference']];
             }
+        }
+
+        $benefits = [];
+        if ($run->run_type === 'regular') {
+            $benefits = EmployeeBenefitEnrollment::query()->with('plan')
+                ->where('employee_id', $re->employee_id)
+                ->whereIn('status', ['active', 'termination_pending', 'ended'])
+                ->whereDate('effective_from', '<=', $end)
+                ->where(fn ($q) => $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $start))
+                ->orderBy('id')->get()
+                ->map(fn ($enrollment) => [
+                    'enrollment_uuid' => $enrollment->uuid,
+                    'plan_code' => $enrollment->plan->code,
+                    'plan_name' => $enrollment->plan->name,
+                    'component_code' => $enrollment->plan->component_code,
+                    'employee_contribution' => (string) ($enrollment->employee_contribution ?? '0'),
+                    'employer_contribution' => (string) ($enrollment->employer_contribution ?? '0'),
+                    'effective_from' => substr((string) $enrollment->effective_from, 0, 10),
+                    'effective_to' => $enrollment->effective_to ? substr((string) $enrollment->effective_to, 0, 10) : null,
+                ])->all();
         }
 
         return ['run_employee_id' => $re->id, 'employee_id' => $re->employee_id, 'group_id' => $run->payroll_group_id, 'period_start' => $start, 'period_end' => $end, 'currency' => $run->currency,
             'run_type' => $run->run_type, 'engine_version' => $settings['calculation']['engine_version'] ?? PayrollSettings::ENGINE_VERSION, 'rounding' => ['mode' => $settings['calculation']['rounding_mode'] ?? 'half_up'],
             'days_basis' => $run->group->settings['payable_day_basis'] ?? null, 'employment' => ['start' => $payFrom, 'end' => $payTo], 'compensation' => $current, 'segments' => $segments,
-            'inputs' => $inputs, 'adjustments' => $adjustments, 'loan_installments' => $loans, 'statutory' => $this->statutory($run, $re, $end), 'overtime' => ['multiplier' => $run->group->settings['overtime_multiplier'] ?? '1']];
+            'inputs' => $inputs, 'adjustments' => $adjustments, 'loan_installments' => $loans, 'benefit_enrollments' => $benefits, 'statutory' => $this->statutory($run, $re, $end), 'overtime' => ['multiplier' => $run->group->settings['overtime_multiplier'] ?? '1']];
     }
 
     /** @param array<int,array<string,mixed>> $lines @return array<int,array<string,mixed>> */

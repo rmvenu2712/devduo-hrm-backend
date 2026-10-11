@@ -2,8 +2,8 @@
 
 namespace App\Domain\Payroll\Models;
 
-use App\Domain\Tenancy\TenantRecord;
 use App\Domain\Tenancy\HasPublicId;
+use App\Domain\Tenancy\TenantRecord;
 
 class BenefitEnrollmentWindow extends TenantRecord
 {
@@ -19,5 +19,10 @@ class BenefitEnrollmentWindow extends TenantRecord
     public function plan()
     {
         return $this->belongsTo(BenefitPlan::class, 'plan_id');
+    }
+
+    public function getRouteKeyName(): string
+    {
+        return 'uuid';
     }
 }

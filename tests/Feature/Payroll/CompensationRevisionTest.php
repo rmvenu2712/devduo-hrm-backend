@@ -7,6 +7,8 @@ use App\Domain\Payroll\Groups\GroupResolver;
 use App\Domain\Payroll\Models\CompensationRevision;
 use App\Domain\Payroll\Models\CompensationRevisionBatch;
 use App\Domain\Payroll\Models\EmployeeCompensation;
+use App\Domain\Payroll\Models\PayrollImport;
+use App\Domain\Payroll\Models\PayrollImportRow;
 use App\Domain\People\Models\Employee;
 use App\Models\Permission;
 use App\Models\Role;
@@ -182,14 +184,16 @@ class CompensationRevisionTest extends TestCase
         $this->context($checker->tenant_id);
         $this->signIn($this->admin);
         $component = DB::table('salary_components')->where('uuid', $c['BASE'])->first();
-        $content = "employee_number,component_code,amount\n{$employee->employee_number},{$component->code},55000.00\nUNKNOWN,BASE,100.00\n";
+        $content = "Staff Number,Pay Component,Amount Value\n{$employee->employee_number},{$component->code},55000.00\nUNKNOWN,BASE,100.00\n";
         $response = $this->postJson('/api/v1/compensation/imports/compensation/preview', [
             'file' => UploadedFile::fake()->createWithContent('revision.csv', $content), 'type' => 'increment', 'effective_date' => '2026-11-01', 'reason' => 'Annual review',
+            'mapping' => ['employee_number' => 'Staff Number', 'component_code' => 'Pay Component', 'amount' => 'Amount Value'],
         ]);
         $this->assertSame(1, $response->json('rows_ok'), json_encode($response->json()));
-        $preview = $response->assertCreated()->assertJsonPath('status', 'previewed')->assertJsonPath('rows_total', 2)->assertJsonPath('rows_error', 1)->json();
+        $preview = $response->assertCreated()->assertJsonPath('status', 'previewed')->assertJsonPath('rows_total', 2)->assertJsonPath('rows_error', 1)->assertJsonPath('mapping.employee_number', 'staff_number')->json();
         $this->context($this->admin->tenant_id);
         $this->assertSame(0, CompensationRevision::count());
+        $this->assertSame($employee->employee_number, PayrollImportRow::query()->where('import_id', PayrollImport::where('uuid', $preview['uuid'])->value('id'))->firstOrFail()->raw['source_row']['Staff Number']);
         $committed = $this->postJson('/api/v1/compensation/imports/compensation/'.$preview['uuid'].'/commit')->assertOk()->assertJsonPath('status', 'committed')->json();
         $this->context($this->admin->tenant_id);
         $this->assertSame(1, CompensationRevision::where('employee_id', $employee->id)->count());

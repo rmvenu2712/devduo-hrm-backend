@@ -12,6 +12,7 @@ use App\Domain\Payroll\Models\PayrollPeriod;
 use App\Domain\Payroll\Models\PayrollRun;
 use App\Domain\Payroll\Models\PayrollRunEmployee;
 use App\Domain\Payroll\Models\PayrollValidationIssue;
+use App\Domain\Payroll\Support\Decimal;
 use App\Domain\Payroll\Support\PayrollSettings;
 use App\Domain\Payroll\Support\PayrollStates;
 use App\Domain\People\Models\Employee;
@@ -121,7 +122,7 @@ final class RunService
 
     public function cancel(User $actor, PayrollRun $run, string $reason): PayrollRun
     {
-        return DB::transaction(function () use ($actor, $run, $reason) {
+        return DB::transaction(function () use ($run, $reason) {
             $run = PayrollRun::whereKey($run->id)->lockForUpdate()->firstOrFail();
             PayrollStates::assertTransition(PayrollStates::RUN_TRANSITIONS, $run->status, 'cancelled', 'status');
             $run->update(['status' => 'cancelled', 'notes' => trim($run->notes."\nCancelled: ".$reason)]);
@@ -169,11 +170,42 @@ final class RunService
             $adj = PayrollAdjustment::where('uuid', $uuid)->lockForUpdate()->firstOrFail();
             abort_unless(app(DataScope::class)->canAccess($actor, $adj->employee_id, 'payroll.adjust.approve'), 404);
             abort_unless($adj->status === 'pending', 409, 'This adjustment has already been reviewed.');
-            abort_if($adj->created_by === $actor->id && PayrollSettings::get('approvals.manual_net_checker', true), 403, 'A different authorized person must review this adjustment.');
+            abort_if($adj->created_by === $actor->id, 403, 'A different authorized person must review this adjustment.');
+            if ($adj->kind === 'reversal') {
+                $original = PayrollAdjustment::whereKey($adj->reverses_id)->lockForUpdate()->firstOrFail();
+                abort_unless(in_array($original->status, ['approved', 'applied'], true), 409, 'Only an approved or applied adjustment can be reversed.');
+                if ($decision === 'approved') {
+                    $original->update(['status' => 'reversed']);
+                }
+            }
             $adj->update(['status' => $decision, 'approved_by' => $actor->id, 'approved_at' => now()]);
             Audit::record('payroll.adjustment.'.$decision, 'payroll', $adj->uuid);
 
             return $adj;
+        });
+    }
+
+    public function reverseAdjustment(User $actor, string $uuid, string $settlementPeriodUuid, string $reason, string $idempotencyKey): PayrollAdjustment
+    {
+        return DB::transaction(function () use ($actor, $uuid, $settlementPeriodUuid, $reason, $idempotencyKey) {
+            abort_unless($actor->allows('payroll.adjust'), 403);
+            if ($existing = PayrollAdjustment::where('idempotency_key', $idempotencyKey)->first()) {
+                return $existing;
+            }
+            $original = PayrollAdjustment::where('uuid', $uuid)->lockForUpdate()->firstOrFail();
+            abort_unless(app(DataScope::class)->canAccess($actor, $original->employee_id, 'payroll.adjust'), 404);
+            abort_unless(in_array($original->status, ['approved', 'applied'], true), 409, 'Only an approved or applied adjustment can be reversed.');
+            abort_if($original->kind === 'reversal', 409, 'A reversal cannot itself be reversed.');
+            abort_if(PayrollAdjustment::where('reverses_id', $original->id)->whereIn('status', ['pending', 'approved', 'applied'])->exists(), 409, 'An active reversal already exists.');
+            $target = PayrollPeriod::where('uuid', $settlementPeriodUuid)->firstOrFail();
+            abort_if(in_array($target->state, ['locked', 'paid', 'closed'], true), 423, 'The settlement period is locked.');
+            $amount = Decimal::str(Decimal::sub('0', (string) $original->amount), 4);
+            $reversal = PayrollAdjustment::create(['employee_id' => $original->employee_id, 'kind' => 'reversal', 'status' => 'pending', 'origin_period_id' => $original->origin_period_id,
+                'settlement_period_id' => $target->id, 'component_code' => $original->component_code, 'amount' => $amount, 'currency' => $original->currency,
+                'reason' => $reason, 'trace' => ['reverses_uuid' => $original->uuid, 'reverses_kind' => $original->kind], 'reverses_id' => $original->id, 'created_by' => $actor->id, 'idempotency_key' => $idempotencyKey]);
+            Audit::record('payroll.adjustment.reversal_requested', 'payroll', $reversal->uuid, ['reverses_uuid' => $original->uuid]);
+
+            return $reversal;
         });
     }
 
