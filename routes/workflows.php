@@ -16,6 +16,8 @@ Route::prefix('v1/workflows')->middleware('module:workflows')->group(function ()
     Route::post('instances', [W::class, 'start'])->middleware('permission:workflows.run');
     Route::get('instances', [W::class, 'instances'])->middleware('permission:workflows.manage|workflows.act|workflows.run');
     Route::get('instances/{uuid}', [W::class, 'show'])->middleware('permission:workflows.manage|workflows.act|workflows.run');
+    Route::get('instances/{uuid}/delegates', [W::class, 'delegationOptions'])->middleware('permission:workflows.manage|workflows.act');
+    Route::post('instances/{uuid}/delegate', [W::class, 'delegate'])->middleware('permission:workflows.manage|workflows.act');
     Route::post('instances/{uuid}/decide', [W::class, 'decide'])->middleware('permission:workflows.act');
     Route::post('instances/{uuid}/control', [W::class, 'control'])->middleware('permission:workflows.manage');
 });

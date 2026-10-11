@@ -135,6 +135,9 @@ final class WorkspaceProvisioner
         'leave.compoff.manage' => ['Leave', 'Grant and approve comp-off credits and claims'],
         'time.configure' => ['Time administration', 'Configure shifts and policies'], 'time.lock' => ['Time administration', 'Lock and independently unlock periods'],
         'organization.view' => ['Organization', 'View organization'], 'organization.manage' => ['Organization', 'Manage organization'],
+        'integrations.view' => ['Integrations', 'View integration connections and sync health'], 'integrations.manage' => ['Integrations', 'Manage integration metadata and diagnostics'],
+        'security.access_reviews.view' => ['Security', 'View access review campaigns'], 'security.access_reviews.manage' => ['Security', 'Create and complete access reviews'],
+        'intelligence.view' => ['Intelligence', 'View permission-filtered HR findings'],
         'users.view' => ['People & access', 'View users and roles'], 'users.manage' => ['People & access', 'Manage users and assign roles'],
         'roles.manage' => ['People & access', 'Manage permissions and roles'], 'settings.manage' => ['Administration', 'Manage company settings'],
         'lifecycle.view' => ['Lifecycle', 'View onboarding, offboarding and move cases in scope'],
@@ -197,7 +200,7 @@ final class WorkspaceProvisioner
         'audit.view' => ['Administration', 'View audit history'], 'work.view' => ['My Work', 'View tasks'], 'work.manage' => ['My Work', 'Create and update tasks'],
     ];
 
-    public const MODULES = ['work', 'notifications', 'people', 'attendance', 'payroll', 'recruitment', 'leave', 'lifecycle', 'performance', 'learning', 'experience', 'assets', 'expenses', 'travel', 'workflows', 'analytics'];
+    public const MODULES = ['work', 'notifications', 'people', 'attendance', 'payroll', 'recruitment', 'leave', 'lifecycle', 'performance', 'learning', 'experience', 'assets', 'expenses', 'travel', 'workflows', 'analytics', 'integrations', 'security', 'intelligence'];
 
     /** Own-data payroll keys: safe for everyone with an employee record. */
     public const PAYROLL_SELF = ['payroll.payslips.view_own', 'payroll.compensation.view_own', 'payroll.loans.view_own', 'payroll.benefits.view_own', 'payroll.benefits.enroll_own', 'payroll.tax_declaration.submit'];
@@ -231,8 +234,8 @@ final class WorkspaceProvisioner
         return [
             'Workspace administrator' => ['Full access to company administration.', 'tenant', true, array_keys(self::PERMISSIONS)],
             'HR administrator' => ['People and time-office administration across the company.', 'tenant', false, array_values(array_diff(array_keys(self::PERMISSIONS), self::hrExcluded()))],
-            'Manager' => ['Manage your direct reports: approvals and team attendance.', 'direct_reports', false, [...self::MANAGER, 'assets.self', 'expenses.self', 'expenses.approve', 'travel.self', 'travel.approve', 'workflows.act', 'analytics.view']],
-            'Team member' => ['Manage your own work.', 'self', false, [...self::MEMBER, 'assets.self', 'expenses.self', 'travel.self', 'workflows.act']],
+            'Manager' => ['Manage your direct reports: approvals and team attendance.', 'direct_reports', false, [...self::MANAGER, 'assets.self', 'expenses.self', 'expenses.approve', 'travel.self', 'travel.approve', 'workflows.act', 'analytics.view', 'intelligence.view']],
+            'Team member' => ['Manage your own work.', 'self', false, [...self::MEMBER, 'assets.self', 'expenses.self', 'travel.self', 'workflows.act', 'intelligence.view']],
         ];
     }
 

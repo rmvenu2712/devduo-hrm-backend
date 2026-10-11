@@ -65,7 +65,11 @@ final class AnalyticsController
                 if (preg_match('/^[=+\-@\t\r\n]/u', $label)) {
                     $label = "'".$label;
                 }
-                fputcsv($out, [$result['label'], $label, $row['value'], $result['unit'], $row['suppressed'] ? 'yes' : 'no', $result['period']['from'], $result['period']['to'], $result['refreshed_at']], ',', '"', '');
+                $value = is_array($row['value'] ?? null)
+                    ? 'gross='.$row['value']['gross'].'; net='.$row['value']['net'].'; gross_change_percent='.$row['value']['gross_change_percent'].'; net_change_percent='.$row['value']['net_change_percent']
+                    : ($row['value'] ?? '');
+                if (is_string($value) && preg_match('/^[=+\-@\t\r\n]/u', $value)) $value = "'".$value;
+                fputcsv($out, [$result['label'], $label, $value, $result['unit'], $row['suppressed'] ? 'yes' : 'no', $result['period']['from'], $result['period']['to'], $result['refreshed_at']], ',', '"', '');
             } fclose($out);
         }, 'workforce-report.csv', ['Content-Type' => 'text/csv; charset=UTF-8', 'Cache-Control' => 'no-store, private', 'X-Content-Type-Options' => 'nosniff']);
     }

@@ -37,7 +37,8 @@ final class TriggerDispatcher
                     // Read bounded batches of all events to advance over unrelated event types, too.
                     $events = DomainEvent::where('id', '>', $cursor->event_id)->orderBy('id')->limit(200)->get();
                     foreach ($events as $e) {
-                        if ($e->type === $trigger['event_type'] && $e->employee_id) {
+                        $statusMatches = ! isset($trigger['status']) || data_get($e->payload, 'to') === $trigger['status'];
+                        if ($e->type === $trigger['event_type'] && $e->employee_id && $statusMatches) {
                             $this->enqueue($v, $e->employee_id, 'event:'.$e->uuid);
                         }
                     }

@@ -3,6 +3,7 @@
 namespace App\Domain\Attendance\Scheduling;
 
 use App\Domain\Attendance\Engine\DaySchedule;
+use App\Domain\Attendance\Engine\Intervals;
 use App\Domain\Attendance\Support\TimeZones;
 use Carbon\CarbonImmutable;
 
@@ -28,8 +29,9 @@ final class ConflictDetector
         if (! $employeeIds) {
             return [];
         }
-        $wideFrom = CarbonImmutable::parse($from)->startOfWeek()->subDay()->toDateString();
-        $wideTo = CarbonImmutable::parse($to)->endOfWeek()->addDay()->toDateString();
+        // Keep a full week around the requested interval so consecutive-night rules at its boundaries are explainable.
+        $wideFrom = CarbonImmutable::parse($from)->subDays(7)->toDateString();
+        $wideTo = CarbonImmutable::parse($to)->addDays(7)->toDateString();
         $decider = ScheduleDecider::load($employeeIds, $wideFrom, $wideTo, $overlay);
         $block = $settings['enforcement'] === 'block';
         $engineOn = $settings['enabled'] && $settings['enforcement'] !== 'off';
@@ -46,6 +48,26 @@ final class ConflictDetector
             $days = [];
             foreach (DatabaseScheduleResolver::dates($wideFrom, $wideTo) as $date) {
                 $days[$date] = $this->resolver->materialize($decider->decide($emp, $date));
+            }
+            $consecutiveNights = 0;
+            foreach ($days as $date => $schedule) {
+                $ctx = $decider->org->at($emp, $date);
+                $effective = $engineOn ? $this->compliance->forCountry($ctx['country'] ?? null) : ['rules' => [], 'layers' => []];
+                $rules = $effective['rules'];
+                $maximum = (int) ($rules['max_consecutive_nights'] ?? 0);
+                $overlapLimit = (int) ($rules['night_min_overlap_minutes'] ?? 180);
+                $nightMinutes = $maximum > 0 && $schedule->kind === 'working'
+                    ? $this->nightOverlapMinutes($schedule, $rules)
+                    : 0;
+                if ($nightMinutes >= $overlapLimit && $overlapLimit > 0) {
+                    $consecutiveNights++;
+                    if ($consecutiveNights === $maximum + 1 && $date >= $from && $date <= $to) {
+                        $layer = $effective['layers']['max_consecutive_nights'] ?? 'country';
+                        $add($emp, $date, 'max_consecutive_nights', 'Maximum consecutive night shifts', $layer, 'warning', "{$name} is scheduled for more than {$maximum} consecutive night shifts by {$date}.");
+                    }
+                } else {
+                    $consecutiveNights = 0;
+                }
             }
             // Proposed entries outside employment (the resolver reports those days as not scheduled).
             foreach ($overlay[$emp] ?? [] as $date => $entry) {
@@ -156,6 +178,27 @@ final class ConflictDetector
     private function net(DaySchedule $s): int
     {
         return ShiftCatalog::netMinutes($s->segments);
+    }
+
+    /** Count scheduled work minutes overlapping the effective local night window; all interval math is UTC/DST-safe. */
+    private function nightOverlapMinutes(DaySchedule $schedule, array $rules): int
+    {
+        $start = $rules['night_window_start'] ?? null;
+        $end = $rules['night_window_end'] ?? null;
+        if (! is_string($start) || ! preg_match('/^\d{2}:\d{2}$/', $start) || ! is_string($end) || ! preg_match('/^\d{2}:\d{2}$/', $end)) {
+            return 0;
+        }
+        $nextDay = $end <= $start ? 1 : 0;
+        $windowStart = TimeZones::localToUtc($schedule->date, $start, $schedule->timezone)->getTimestamp();
+        $windowEnd = TimeZones::localToUtc($schedule->date, $end, $schedule->timezone, $nextDay)->getTimestamp();
+        $work = [];
+        foreach ($schedule->segments as $segment) {
+            if ($segment->kind === 'work') {
+                $work[] = [$segment->start->getTimestamp(), $segment->end->getTimestamp()];
+            }
+        }
+
+        return intdiv(Intervals::overlap($work, [[$windowStart, $windowEnd]]), 60);
     }
 
     private function hm(int $minutes): string

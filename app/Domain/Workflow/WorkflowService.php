@@ -31,13 +31,17 @@ final class WorkflowService
     public function validateSpec(array $input): array
     {
         $spec = validator($input, [
-            'trigger' => 'sometimes|array:type,event_type,employee_uuid,at,interval_hours',
+            'trigger' => 'sometimes|array:type,event_type,status,employee_uuid,at,interval_hours',
             'trigger.type' => 'required_with:trigger|in:manual,event,schedule',
-            'trigger.event_type' => 'required_if:trigger.type,event|in:EmployeeCreated',
+            'trigger.event_type' => 'required_if:trigger.type,event|in:'.implode(',', array_keys(WorkflowEventCatalog::EVENTS)),
+            'trigger.status' => 'required_if:trigger.event_type,EmploymentStatusChanged|in:'.implode(',', WorkflowEventCatalog::EMPLOYMENT_STATUSES),
             'trigger.employee_uuid' => 'required_if:trigger.type,schedule|uuid',
             'trigger.at' => 'required_if:trigger.type,schedule|date_format:Y-m-d\TH:i:sP',
             'trigger.interval_hours' => 'sometimes|integer|min:0|max:8760',
-            'steps' => 'required|array|min:1|max:25', 'steps.*' => 'array:title,action,assignees,assignment,mode,timeout_hours,worker_type',
+            'steps' => 'required|array|min:1|max:25', 'steps.*' => 'array:title,action,assignees,assignment,mode,timeout_hours,worker_type,escalation_assignees,escalation_hours',
+            'steps.*.escalation_assignees' => 'sometimes|array|max:10',
+            'steps.*.escalation_assignees.*' => 'required|integer',
+            'steps.*.escalation_hours' => 'sometimes|integer|min:1|max:8760',
             'steps.*.title' => 'required|string|max:150', 'steps.*.action' => 'required|in:approval,task,notify,wait',
             'steps.*.assignment' => 'required|in:fixed,manager', 'steps.*.assignees' => 'present|array|max:10',
             'steps.*.assignees.*' => 'required|integer', 'steps.*.mode' => 'required|in:all,any',
@@ -47,6 +51,9 @@ final class WorkflowService
         if (($spec['trigger']['type'] ?? '') === 'schedule') {
             Employee::where('uuid', $spec['trigger']['employee_uuid'])->firstOrFail();
         }
+        if (isset($spec['trigger']['status']) && ($spec['trigger']['event_type'] ?? null) !== 'EmploymentStatusChanged') {
+            $this->invalid('A target status is only valid for an employment status event.');
+        }
         foreach ($spec['steps'] as $step) {
             if (count(array_unique($step['assignees'])) !== count($step['assignees'])) {
                 $this->invalid('An assignee may appear only once in each step.');
@@ -54,7 +61,13 @@ final class WorkflowService
             if ($step['action'] !== 'wait' && $step['assignment'] === 'fixed' && ! count($step['assignees'])) {
                 $this->invalid('Choose at least one assignee.');
             }
-            foreach ($step['assignees'] as $id) {
+            if (count(array_unique($step['escalation_assignees'] ?? [])) !== count($step['escalation_assignees'] ?? [])) {
+                $this->invalid('An escalation assignee may appear only once per step.');
+            }
+            if (!empty($step['escalation_assignees']) && !in_array($step['action'], ['task', 'approval'])) {
+                $this->invalid('Only task and approval steps support escalation.');
+            }
+            foreach ([...$step['assignees'], ...($step['escalation_assignees'] ?? [])] as $id) {
                 $u = User::where('tenant_id', app(TenantContext::class)->id)->whereKey($id)->first();
                 if (! $u || ! $u->allows('workflows.act')) {
                     $this->invalid('Every assignee must be an active workflow participant in this workspace.');
@@ -206,6 +219,11 @@ final class WorkflowService
                 return;
             }
             $ids = $this->recipients($i, $s);
+            $existing = Assignment::where('instance_id', $i->id)->where('step_index', $i->step_index)->get();
+            if ($existing->isNotEmpty()) {
+                // Retry the unresolved assignments, including delegated/escalated recipients.
+                $ids = $existing->where('status', 'pending')->pluck('user_id')->map(fn ($id) => (int) $id)->all();
+            }
             if (! $ids || collect($ids)->contains(fn ($id) => ! $this->eligible($i, $id, $s['action'] === 'approval'))) {
                 $this->fail($i, 'assignee_unavailable_or_out_of_scope');
 
@@ -229,9 +247,7 @@ final class WorkflowService
                 if ($a->status !== 'pending') {
                     continue;
                 }
-                app(TaskService::class)->createOnce(['title' => $s['title'], 'priority' => 'normal', 'assignee_id' => $id, 'due_date' => $i->due_at->toDateString(),
-                    'source_module' => 'workflows', 'source_entity' => $this->source($i), 'action' => '/workflows/instances/'.$i->uuid, 'status' => 'open',
-                    'metadata' => ['workflow_instance' => $i->uuid]]);
+                $this->task($i, $s, $id);
             }
             $this->log($i, 'assignments_created');
 
@@ -246,6 +262,73 @@ final class WorkflowService
     private function source(Instance $i): string
     {
         return $i->uuid.':'.$i->step_index;
+    }
+
+    private function task(Instance $i, array $step, int $userId): void
+    {
+        app(TaskService::class)->createOnce(['title' => $step['title'], 'priority' => 'normal', 'assignee_id' => $userId,
+            'due_date' => $i->due_at->toDateString(), 'source_module' => 'workflows', 'source_entity' => $this->source($i),
+            'action' => '/workflows/instances/'.$i->uuid, 'status' => 'open', 'metadata' => ['workflow_instance' => $i->uuid]]);
+    }
+
+    private function reassign(Instance $i, array $step, Assignment $from, int $target, string $reason, ?int $actor, string $event): void
+    {
+        $from->update(['status' => $event, 'reason' => $reason, 'decided_at' => now()]);
+        WorkItem::where('source_module', 'workflows')->where('source_entity', $this->source($i))->where('assignee_id', $from->user_id)
+            ->where('status', 'open')->update(['status' => 'completed', 'completed_at' => now()]);
+        Assignment::create(['instance_id' => $i->id, 'step_index' => $i->step_index, 'user_id' => $target, 'status' => 'pending']);
+        $this->task($i, $step, $target);
+        $this->log($i, $event, $actor, ['from_user' => $from->user_id, 'to_user' => $target, 'reason' => $reason]);
+    }
+
+    public function delegate(User $u, string $uuid, int $fromUser, int $target, string $reason): Instance
+    {
+        return DB::transaction(function () use ($u, $uuid, $fromUser, $target, $reason) {
+            $i = $this->visible($u)->where('uuid', $uuid)->lockForUpdate()->firstOrFail();
+            if ($i->status !== 'waiting' || $i->due_at?->isPast()) $this->invalid('Only pending work before its deadline can be delegated.');
+            $step = Version::findOrFail($i->version_id)->spec['steps'][$i->step_index];
+            abort_unless(in_array($step['action'], ['task', 'approval']), 422);
+            $manager = $u->allows('workflows.manage') && app(DataScope::class)->hasTenantWide($u, 'workflows.manage');
+            abort_unless($manager || ($u->id === $fromUser && $this->eligible($i, $u->id, $step['action'] === 'approval')), 403);
+            if (!$this->authority($i)) $this->invalid('The initiator no longer has execution authority.');
+            if (!$this->eligible($i, $target, $step['action'] === 'approval')) $this->invalid('The new assignee lacks independent approval authority or employee access.');
+            $assignments = Assignment::where('instance_id', $i->id)->where('step_index', $i->step_index);
+            if ((clone $assignments)->where('user_id', $target)->exists()) $this->invalid('Choose someone who has not already participated in this step.');
+            $from = (clone $assignments)->where('user_id', $fromUser)->where('status', 'pending')->firstOrFail();
+            $this->reassign($i, $step, $from, $target, $reason, $u->id, 'delegated');
+            return $i;
+        });
+    }
+
+    public function delegationOptions(User $u, string $uuid): array
+    {
+        $i = $this->visible($u)->where('uuid', $uuid)->firstOrFail();
+        $manager = $u->allows('workflows.manage') && app(DataScope::class)->hasTenantWide($u, 'workflows.manage');
+        $ownsPendingAssignment = Assignment::where('instance_id', $i->id)->where('step_index', $i->step_index)
+            ->where('user_id', $u->id)->where('status', 'pending')->exists();
+        abort_unless($manager || $ownsPendingAssignment, 403);
+        $step = Version::findOrFail($i->version_id)->spec['steps'][$i->step_index] ?? null;
+        if (!$step || !in_array($step['action'], ['approval','task']) || $i->status !== 'waiting' || $i->due_at?->isPast()) return [];
+        $used = Assignment::where('instance_id', $i->id)->where('step_index', $i->step_index)->pluck('user_id');
+        return User::where('tenant_id', $i->tenant_id)->where('active', true)->whereNotIn('id', $used)
+            ->whereHas('roles.permissions', fn ($q) => $q->where('key', 'workflows.act'))->get(['id','name','tenant_id','active'])
+            ->filter(fn ($candidate) => $this->eligible($i, $candidate->id, $step['action'] === 'approval'))->take(100)
+            ->map(fn ($candidate) => ['id' => $candidate->id, 'name' => $candidate->name])->values()->all();
+    }
+
+    private function expire(Instance $i, array $step): void
+    {
+        if (!$this->authority($i)) { $this->fail($i, 'initiator_permission_changed'); return; }
+        $targets = $step['escalation_assignees'] ?? [];
+        if (!$targets || Execution::where('instance_id', $i->id)->where('step_index', $i->step_index)->where('event', 'escalated')->exists()) {
+            $this->fail($i, 'deadline_exceeded'); return;
+        }
+        $assignments = Assignment::where('instance_id', $i->id)->where('step_index', $i->step_index)->get();
+        $pending = $assignments->where('status', 'pending')->values();
+        $targets = array_values(array_filter($targets, fn ($id) => !$assignments->contains('user_id', $id) && $this->eligible($i, (int)$id, $step['action'] === 'approval')));
+        if (!$pending->count() || count($targets) < $pending->count()) { $this->fail($i, 'escalation_assignee_unavailable'); return; }
+        $i->due_at = now()->addHours($step['escalation_hours'] ?? 24); $i->save();
+        foreach ($pending as $index => $from) $this->reassign($i, $step, $from, (int)$targets[$index], 'Deadline exceeded; published escalation policy applied.', null, 'escalated');
     }
 
     private function close(Instance $i): void
@@ -278,7 +361,7 @@ final class WorkflowService
                 return $i;
             }
             if ($i->due_at?->isPast()) {
-                $this->fail($i, 'deadline_exceeded');
+                $this->expire($i, $s);
 
                 return $i;
             }
@@ -360,7 +443,7 @@ final class WorkflowService
                     $i->save();
                     $this->advance($i);
                 } else {
-                    $this->fail($i, 'deadline_exceeded');
+                    $this->expire($i, $s);
                 }
             });
             $count++;
@@ -397,6 +480,7 @@ final class WorkflowService
             $result['current_step'] = $step;
             $result['can_decide'] = $step && $i->status === 'waiting' && $this->eligible($i, $u->id, $step['action'] === 'approval')
                 && Assignment::where('instance_id', $i->id)->where('step_index', $i->step_index)->where('user_id', $u->id)->where('status', 'pending')->exists();
+            $result['my_assignment_user_id'] = $result['can_decide'] ? $u->id : null;
             $result['assignments'] = Assignment::where('instance_id', $i->id)->get(['step_index', 'user_id', 'status', 'reason', 'decided_at']);
             $result['trace'] = Execution::where('instance_id', $i->id)->orderBy('id')->get(['step_index', 'event', 'actor_id', 'details', 'created_at']);
         }

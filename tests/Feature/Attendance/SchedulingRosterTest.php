@@ -162,6 +162,25 @@ class SchedulingRosterTest extends TestCase
         $this->assertDoesNotMatchRegularExpression("/'(IN|US|GB|AE|DE|SG|AU)'/", $engine);
     }
 
+    public function test_consecutive_night_limit_flags_only_the_first_night_over_the_tenant_limit(): void
+    {
+        $employee = $this->hire('Ben Ford', ['location' => 1]); // GB compliance pack
+        $night = $this->shift('NIGHT', '22:00', '06:00', ['timezone' => 'Europe/London']);
+        $roster = $this->roster();
+        foreach (['2026-11-09', '2026-11-10', '2026-11-11', '2026-11-12'] as $date) {
+            $this->set($roster, $employee, $date, $night);
+        }
+        app(\App\Domain\Attendance\Scheduling\ComplianceRules::class)->save([
+            'countries' => ['GB' => ['rules' => ['max_consecutive_nights' => 2]]],
+        ]);
+
+        $conflicts = array_values(array_filter($this->svc()->validate($roster), fn ($conflict) => $conflict['code'] === 'max_consecutive_nights'));
+        $this->assertCount(1, $conflicts);
+        $this->assertSame('2026-11-11', $conflicts[0]['date']);
+        $this->assertSame('tenant', $conflicts[0]['layer']);
+        $this->assertSame('flag', $conflicts[0]['level']);
+    }
+
     public function test_bulk_assign_preview_copy_and_locks(): void
     {
         $e1 = $this->hire('Asha Rao');

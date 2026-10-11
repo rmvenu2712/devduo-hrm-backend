@@ -33,6 +33,9 @@ Route::prefix('api')->group(function () {
         require __DIR__.'/travel.php';
         require __DIR__.'/workflows.php';
         require __DIR__.'/analytics.php';
+        require __DIR__.'/integrations.php';
+        require __DIR__.'/security.php';
+        require __DIR__.'/intelligence.php';
         Route::post('logout', [AuthController::class, 'logout']);
         Route::post('change-password', [AuthController::class, 'change'])->middleware('throttle:5,1');
         Route::get('dashboard', [FeedController::class, 'dashboard']);

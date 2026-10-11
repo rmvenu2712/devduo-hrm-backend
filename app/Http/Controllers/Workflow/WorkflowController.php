@@ -8,6 +8,7 @@ use App\Domain\People\Models\Employee;
 use App\Domain\Workflow\Models\Definition;
 use App\Domain\Workflow\Models\Version;
 use App\Domain\Workflow\WorkflowService;
+use App\Domain\Workflow\WorkflowEventCatalog;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -82,6 +83,18 @@ final class WorkflowController
         return $this->service->present($this->service->decide($r->user(), $uuid, $d['decision'], $d['reason']), $r->user(), true);
     }
 
+    public function delegate(Request $r, string $uuid)
+    {
+        $d = $r->validate(['from_user_id' => 'required|integer', 'to_user_id' => 'required|integer|different:from_user_id', 'reason' => 'required|string|max:1000']);
+
+        return $this->service->present($this->service->delegate($r->user(), $uuid, $d['from_user_id'], $d['to_user_id'], $d['reason']), $r->user(), true);
+    }
+
+    public function delegationOptions(Request $r, string $uuid)
+    {
+        return ['data' => $this->service->delegationOptions($r->user(), $uuid)];
+    }
+
     public function control(Request $r, string $uuid)
     {
         $d = $r->validate(['action' => 'required|in:pause,resume,cancel,retry', 'reason' => 'required|string|max:1000']);
@@ -100,7 +113,8 @@ final class WorkflowController
         }
 
         return ['employees' => $q->limit(100)->get(['uuid', 'employee_number']),
-            'users' => User::where('tenant_id', $r->user()->tenant_id)->where('active', true)->whereHas('roles.permissions', fn ($q) => $q->where('key', 'workflows.act'))->limit(100)->get(['id', 'name'])];
+            'users' => User::where('tenant_id', $r->user()->tenant_id)->where('active', true)->whereHas('roles.permissions', fn ($q) => $q->where('key', 'workflows.act'))->limit(100)->get(['id', 'name']),
+            'event_types' => WorkflowEventCatalog::options()];
     }
 
     public function deliveries(Request $r)
