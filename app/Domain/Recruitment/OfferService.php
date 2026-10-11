@@ -22,7 +22,7 @@ final class OfferService
         abort_unless($actor->allows('recruitment.offer.manage'), 403);
         return DB::transaction(function () use ($actor, $applicationUuid, $data) {
             $app = app(HiringScope::class)->applications($actor, 'recruitment.offer.manage')->where('uuid', $applicationUuid)->lockForUpdate()->firstOrFail();
-            abort_unless($app->status === 'active' && $app->stage === 'offer', 409, 'Offers can be drafted only for active applications in the offer stage.');
+            abort_unless($app->status === 'active' && app(PipelineService::class)->stageKind($app->requisition, $app->stage) === 'offer', 409, 'Offers can be drafted only for active applications in the offer stage.');
             abort_if(Offer::where('application_id', $app->id)->where('status', 'accepted')->exists(), 409, 'An offer was already accepted for this application.');
             $reference = $data['compensation_reference'] ?? null;
             if (!empty($data['benchmark_employee_uuid'])) $reference = $this->benchmark($actor, $data['benchmark_employee_uuid'], $data['start_date'], $reference);
@@ -71,15 +71,17 @@ final class OfferService
             app(TaskService::class)->completeBySource('recruitment', 'offer:'.$o->uuid);
             RecruitmentNotify::tell($o->created_by, 'Offer '.$decision, 'An offer you drafted was '.$decision.'.');
             Audit::record('offer.'.$decision, 'recruitment', $o->uuid);
+            if ($decision === 'approved') app(OfferDocumentService::class)->autoGenerate($actor, $o, 'approved');
         });
     }
 
     public function send(User $actor, string $uuid): Offer
     {
-        return $this->step($actor, $uuid, 'recruitment.offer.manage', ['approved'], function (Offer $o) {
+        return $this->step($actor, $uuid, 'recruitment.offer.manage', ['approved'], function (Offer $o) use ($actor) {
             abort_if($o->expires_on && $o->expires_on->toDateString() < now('UTC')->toDateString(), 409, 'The offer has expired; draft a new version.');
             $o->update(['status' => 'sent', 'sent_at' => now()]);
             Audit::record('offer.sent', 'recruitment', $o->uuid);
+            app(OfferDocumentService::class)->autoGenerate($actor, $o->refresh(), 'sent');
         });
     }
 

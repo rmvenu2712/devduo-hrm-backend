@@ -26,6 +26,9 @@ final class HiringService
             abort_unless($record->status === 'pending', 409, 'This requisition has already been reviewed.');
             $record->update(['status' => $decision, 'approved_by' => $actor->id, 'opened_at' => $decision === 'open' ? now() : null]);
             if ($decision === 'open') {
+                app(PipelineService::class)->bind($record); // snapshot the pipeline version at open
+            }
+            if ($decision === 'open') {
                 RecruitmentNotify::tell($record->recruiter_id, 'Requisition approved', 'A hiring requisition is open for sourcing.');
             }
             if ($decision === 'open') {
@@ -53,8 +56,10 @@ final class HiringService
             if ($existing) {
                 return $existing;
             }
-            $record = Application::create(['candidate_id' => $candidate->id, 'requisition_id' => $requisition->id, 'stage' => 'applied', 'status' => 'active', 'source' => $data['source'], 'stage_entered_at' => now()]);
-            ApplicationAction::create(['application_id' => $record->id, 'actor_id' => $actor->id, 'from_stage' => null, 'to_stage' => 'applied', 'status' => 'active', 'reason' => 'Application recorded', 'idempotency_key' => (string) Str::uuid()]);
+            $pipeline = app(PipelineService::class)->bind($requisition);
+            $first = app(PipelineService::class)->firstStage($pipeline);
+            $record = Application::create(['candidate_id' => $candidate->id, 'requisition_id' => $requisition->id, 'stage' => $first, 'status' => 'active', 'source' => $data['source'], 'stage_entered_at' => now()]);
+            ApplicationAction::create(['application_id' => $record->id, 'actor_id' => $actor->id, 'from_stage' => null, 'to_stage' => $first, 'status' => 'active', 'reason' => 'Application recorded', 'idempotency_key' => (string) Str::uuid()]);
             Audit::record('application.created', 'recruitment', $record->uuid);
 
             return $record;
@@ -75,10 +80,22 @@ final class HiringService
             }
             abort_unless($record->status === 'active', 409, 'Closed applications cannot be moved.');
             abort_unless($record->stage === $data['expected_stage'], 409, 'Application changed; refresh before moving it.');
-            $current = array_search($record->stage, self::STAGES, true);
-            $next = array_search($data['stage'], self::STAGES, true);
-            if ($data['status'] === 'active' && $next !== $current + 1) {
-                throw ValidationException::withMessages(['stage' => 'Move to the next stage. Hiring requires the separate offer and employee-conversion workflow.']);
+            $pipeline = app(PipelineService::class)->bind($record->requisition);
+            $codes = $pipeline->stages->pluck('code')->all();
+            $current = array_search($record->stage, $codes, true);
+            $next = array_search($data['stage'], $codes, true);
+            if ($data['status'] === 'active') {
+                if ($next === false) {
+                    throw ValidationException::withMessages(['stage' => 'This stage is not part of the requisition pipeline.']);
+                }
+                $kind = $pipeline->stages[$next]->kind;
+                if (in_array($kind, ['hired', 'rejected'], true)) {
+                    throw ValidationException::withMessages(['stage' => 'Hiring and rejection are recorded through the offer/handover workflow or by closing the application.']);
+                }
+                $ok = $current !== false && ($next === $current + 1 || ($pipeline->allow_skip && $next > $current));
+                if (! $ok) {
+                    throw ValidationException::withMessages(['stage' => $pipeline->allow_skip ? 'Move forward to a later stage of the pipeline.' : 'Move to the next stage. Hiring requires the separate offer and employee-conversion workflow.']);
+                }
             }
             if ($data['status'] !== 'active' && $data['stage'] !== $record->stage) {
                 throw ValidationException::withMessages(['stage' => 'Closing an application preserves its final stage.']);

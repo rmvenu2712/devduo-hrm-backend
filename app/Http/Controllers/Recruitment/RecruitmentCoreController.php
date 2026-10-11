@@ -91,6 +91,8 @@ final class RecruitmentCoreController
         DB::transaction(function () use ($c) {
             $c->update(['name' => 'Anonymized applicant', 'email' => 'anonymized-'.$c->uuid.'@invalid.local', 'email_hash' => hash('sha256', $c->uuid), 'phone' => null, 'consent_reference' => 'removed', 'anonymized_at' => now()]);
             Application::where('candidate_id', $c->id)->where('status', 'active')->update(['status' => 'withdrawn', 'closed_at' => now()]);
+            app(\App\Domain\Recruitment\ResumeService::class)->purgeForCandidate($c);
+            app(\App\Domain\Recruitment\OfferDocumentService::class)->purgeForCandidate($c);
             Audit::record('candidate.anonymized', 'recruitment', $c->uuid);
         });
 

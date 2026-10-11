@@ -39,13 +39,13 @@ final class RecruitmentController
             'uuid' => $q->uuid, 'title' => $q->job->title, 'job_version' => $q->job->version, 'openings' => $q->openings,
             'status' => $q->status, 'confidential' => $q->confidential, 'target_date' => $q->target_date->toDateString(), 'filled_count' => $q->filled_count,
             'budget_amount' => $q->budget_amount, 'budget_currency' => $q->budget_currency, 'department_id' => $q->department_id, 'position_id' => $q->position_id,
-            'can_review' => $q->created_by !== $r->user()->id && $q->status === 'pending',
+            'version' => (int) $q->version, 'pipeline_code' => $q->pipeline_code, 'can_review' => $q->created_by !== $r->user()->id && $q->status === 'pending',
         ]);
     }
 
     public function createRequisition(Request $r)
     {
-        $data = $r->validate(['job_uuid' => 'required|uuid', 'legal_entity_id' => 'required|integer', 'position_id' => 'nullable|integer', 'recruiter_id' => 'required|integer', 'hiring_manager_id' => 'required|integer', 'openings' => 'required|integer|min:1|max:10000', 'target_date' => 'required|date_format:Y-m-d', 'kind' => ['required', Rule::in(['new', 'replacement', 'contract', 'intern'])], 'confidential' => 'boolean', 'department_id' => 'nullable|integer', 'location_id' => 'nullable|integer', 'budget_amount' => 'nullable|numeric|min:0|max:999999999999', 'budget_currency' => 'nullable|required_with:budget_amount|alpha|size:3', 'reason' => 'required|string|max:2000', 'idempotency_key' => 'required|uuid']);
+        $data = $r->validate(['job_uuid' => 'required|uuid', 'legal_entity_id' => 'required|integer', 'position_id' => 'nullable|integer', 'recruiter_id' => 'required|integer', 'hiring_manager_id' => 'required|integer', 'openings' => 'required|integer|min:1|max:10000', 'target_date' => 'required|date_format:Y-m-d', 'kind' => ['required', Rule::in(['new', 'replacement', 'contract', 'intern'])], 'confidential' => 'boolean', 'pipeline_code' => 'nullable|regex:/^[A-Z][A-Z0-9_]{0,39}$/', 'department_id' => 'nullable|integer', 'location_id' => 'nullable|integer', 'budget_amount' => 'nullable|numeric|min:0|max:999999999999', 'budget_currency' => 'nullable|required_with:budget_amount|alpha|size:3', 'reason' => 'required|string|max:2000', 'idempotency_key' => 'required|uuid']);
         $job = JobDefinition::where('uuid', $data['job_uuid'])->firstOrFail();
         OrganizationRecord::forType('legal-entities')->newQuery()->whereKey($data['legal_entity_id'])->firstOrFail();
         if (!empty($data['department_id'])) OrganizationRecord::forType('departments')->newQuery()->whereKey($data['department_id'])->firstOrFail();
@@ -64,6 +64,7 @@ final class RecruitmentController
             $u = User::where('tenant_id', $r->user()->tenant_id)->where('active', true)->whereKey($data[$key])->firstOrFail();
             if (!$u->allows('recruitment.view')) throw ValidationException::withMessages([$key => 'Choose a user with recruitment viewing permission.']);
         }
+        if (!empty($data['pipeline_code'])) \App\Domain\Recruitment\Models\Pipeline::where('code', $data['pipeline_code'])->where('status', 'active')->firstOrFail();
         unset($data['job_uuid']);
         $record = DB::transaction(function () use ($r, $data, $job) {
             DB::table('tenants')->where('id', $r->user()->tenant_id)->lockForUpdate()->first();
@@ -132,7 +133,7 @@ final class RecruitmentController
 
     public function transition(Request $r, string $uuid, HiringService $service)
     {
-        $data = $r->validate(['stage' => ['required', Rule::in(HiringService::STAGES)], 'expected_stage' => ['required', Rule::in(HiringService::STAGES)], 'status' => ['required', Rule::in(['active', 'rejected', 'withdrawn'])], 'reason' => 'required|string|max:2000', 'idempotency_key' => 'required|uuid']);
+        $data = $r->validate(['stage' => ['required', 'regex:/^[a-z][a-z0-9_]{0,23}$/'], 'expected_stage' => ['required', 'regex:/^[a-z][a-z0-9_]{0,23}$/'], 'status' => ['required', Rule::in(['active', 'rejected', 'withdrawn'])], 'reason' => 'required|string|max:2000', 'idempotency_key' => 'required|uuid']);
         return ['uuid' => $service->transition($r->user(), $uuid, $data)->uuid];
     }
 

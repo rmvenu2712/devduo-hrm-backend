@@ -14,4 +14,6 @@ Route::prefix('v1/recruitment')->middleware('module:recruitment')->group(functio
     Route::post('applications/{uuid}/transition', [Recruitment::class, 'transition'])->middleware('permission:recruitment.manage');
     Route::get('applications/{uuid}/history', [Recruitment::class, 'history'])->middleware('permission:recruitment.view');
     require __DIR__.'/recruitment/core.php';
+    require __DIR__.'/recruitment/documents.php';
+    require __DIR__.'/recruitment/pipelines.php';
 });

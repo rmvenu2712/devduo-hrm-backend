@@ -20,8 +20,23 @@ final class RecruitmentHousekeeping
     {
         // Short-lived encrypted staging data is never retained past its review window.
         \App\Domain\Recruitment\Models\CandidateImport::where('expires_at', '<', now())->delete();
-        $counts = ['offers_expired' => 0, 'postings_closed' => 0, 'stage_reminders' => 0, 'feedback_reminders' => 0];
+        $counts = ['resumes_purged' => 0, 'offer_documents_purged' => 0, 'offers_expired' => 0, 'postings_closed' => 0, 'stage_reminders' => 0, 'feedback_reminders' => 0];
         $today = now('UTC')->toDateString();
+        // Files and letter snapshots of anonymized or retention-expired (non-hired) candidates are removed; purge is idempotent.
+        \App\Domain\Recruitment\Models\Candidate::where(fn ($q) => $q->whereNotNull('anonymized_at')->orWhere('retention_until', '<', $today))->orderBy('id')->chunkById(100, function ($candidates) use (&$counts) {
+            foreach ($candidates as $candidate) {
+                if (! ResumeService::retentionPurgeable($candidate)) {
+                    continue;
+                }
+                $files = app(ResumeService::class)->purgeForCandidate($candidate);
+                $docs = app(OfferDocumentService::class)->purgeForCandidate($candidate);
+                if ($files || $docs) {
+                    Audit::record('candidate.files_purged', 'recruitment', $candidate->uuid, ['resumes' => $files, 'offer_documents' => $docs]);
+                }
+                $counts['resumes_purged'] += $files;
+                $counts['offer_documents_purged'] += $docs;
+            }
+        });
         Offer::whereIn('status', OfferService::OPEN)->where('expires_on', '<', $today)->orderBy('id')->chunkById(100, function ($offers) use (&$counts, $today) {
             foreach ($offers as $offer) {
                 DB::transaction(function () use ($offer, &$counts, $today) {
@@ -49,36 +64,55 @@ final class RecruitmentHousekeeping
                 });
             }
         });
-        Application::where('status', 'active')->whereNull('stage_reminded_at')->where('stage_entered_at', '<=', now()->subDays(30)->format('Y-m-d H:i:s'))
-            ->orderBy('id')->chunkById(100, function ($rows) use (&$counts, $today) {
+        // Per-stage SLA from the requisition's pipeline (fallback: the former fixed 30 days). Idempotent per application+stage via stage_reminded_at, reset on every move.
+        $pipelines = app(PipelineService::class);
+        Application::where('status', 'active')->whereNull('stage_reminded_at')->where('stage_entered_at', '<=', now()->subHour()->format('Y-m-d H:i:s'))
+            ->orderBy('id')->chunkById(100, function ($rows) use (&$counts, $today, $pipelines) {
                 foreach ($rows as $row) {
-                    DB::transaction(function () use ($row, &$counts, $today) {
+                    DB::transaction(function () use ($row, &$counts, $today, $pipelines) {
                         $current = Application::whereKey($row->id)->lockForUpdate()->first();
-                        if (! $current || $current->status !== 'active' || $current->stage_reminded_at || $current->stage_entered_at > now()->subDays(30)->format('Y-m-d H:i:s')) {
+                        if (! $current || $current->status !== 'active' || $current->stage_reminded_at) {
                             return;
                         }
-                        if ($current->candidate->anonymized_at || $current->candidate->retention_until < $today || $current->requisition->status !== 'open') {
+                        $requisition = $current->requisition;
+                        $stage = $pipelines->resolve($requisition)->stages->firstWhere('code', $current->stage);
+                        if (in_array($stage?->kind, ['hired', 'rejected'], true) || $current->stage_entered_at > now()->subHours(PipelineService::slaHours($stage))->format('Y-m-d H:i:s')) {
                             return;
                         }
-                        $actor = $this->recipient($current->requisition->recruiter_id, 'recruitment.manage');
-                        if (! $actor || ! app(HiringScope::class)->applications($actor, 'recruitment.manage')->whereKey($current->id)->exists()) {
+                        if ($current->candidate->anonymized_at || $current->candidate->retention_until < $today || $requisition->status !== 'open') {
                             return;
                         }
-                        RecruitmentNotify::tell($actor->id, 'Hiring stage needs attention', 'An active application has waited in its current stage for at least 30 days.', '/recruitment/pipeline/'.$current->requisition->uuid);
+                        $notified = 0;
+                        foreach (array_unique($stage?->reminder_recipients ?: ['recruiter']) as $role) {
+                            $actor = $this->recipient($role === 'hiring_manager' ? $requisition->hiring_manager_id : $requisition->recruiter_id, 'recruitment.manage');
+                            if (! $actor || ! app(HiringScope::class)->applications($actor, 'recruitment.manage')->whereKey($current->id)->exists()) {
+                                continue;
+                            }
+                            RecruitmentNotify::tell($actor->id, 'Hiring stage needs attention', 'An active application has exceeded the SLA of its current stage.', '/recruitment/pipeline/'.$requisition->uuid);
+                            $notified++;
+                        }
+                        if (! $notified) {
+                            return;
+                        }
                         $current->update(['stage_reminded_at' => now()]);
-                        Audit::record('application.stage_reminded', 'recruitment', $current->uuid);
+                        Audit::record('application.stage_reminded', 'recruitment', $current->uuid, ['stage' => $current->stage]);
                         $counts['stage_reminders']++;
                     });
                 }
             });
-        Panelist::whereNull('feedback_reminded_at')->whereIn('interview_id', Interview::where('status', 'scheduled')->where('ends_at', '<=', now('UTC')->subDay()->format('Y-m-d H:i:s'))->select('id'))
-            ->orderBy('id')->chunkById(100, function ($rows) use (&$counts, $today) {
+        Panelist::whereNull('feedback_reminded_at')->whereIn('interview_id', Interview::where('status', 'scheduled')->where('ends_at', '<=', now('UTC')->subHour()->format('Y-m-d H:i:s'))->select('id'))
+            ->orderBy('id')->chunkById(100, function ($rows) use (&$counts, $today, $pipelines) {
                 foreach ($rows as $row) {
-                    DB::transaction(function () use ($row, &$counts, $today) {
+                    DB::transaction(function () use ($row, &$counts, $today, $pipelines) {
                         // Same lock order as scorecard submission: interview before panelist.
                         $interview = Interview::whereKey($row->interview_id)->lockForUpdate()->first();
                         $panel = Panelist::whereKey($row->id)->lockForUpdate()->first();
-                        if (! $interview || ! $panel || $panel->feedback_reminded_at || $interview->status !== 'scheduled' || $interview->ends_at > now('UTC')->subDay() || $interview->scorecards()->where('user_id', $panel->user_id)->exists()) {
+                        if (! $interview || ! $panel || $panel->feedback_reminded_at || $interview->status !== 'scheduled' || $interview->scorecards()->where('user_id', $panel->user_id)->exists()) {
+                            return;
+                        }
+                        // Tenant-level window lives on the requisition's pipeline version (default 24h).
+                        $hours = $pipelines->resolve($interview->application->requisition)->feedback_reminder_hours ?: PipelineService::FALLBACK_FEEDBACK_HOURS;
+                        if ($interview->ends_at > now('UTC')->subHours($hours)) {
                             return;
                         }
                         $candidate = $interview->application->candidate;

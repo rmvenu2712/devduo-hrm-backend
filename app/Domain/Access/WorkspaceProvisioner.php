@@ -69,6 +69,7 @@ final class WorkspaceProvisioner
         'recruitment.handover' => ['Recruitment', 'Convert an accepted offer into an employee record'],
         'recruitment.reports.view' => ['Recruitment', 'View recruitment pipeline analytics'],
         'recruitment.privacy.manage' => ['Recruitment', 'Anonymize expired applicant data and reveal contact details'],
+        'recruitment.pipeline.manage' => ['Recruitment', 'Configure hiring pipelines and stage SLAs'],
         // People — directory and profile
         'people.directory' => ['People', 'Search the company directory (coworker basics only)'],
         'people.view' => ['People', 'View employee records within your data scope'],
