@@ -140,4 +140,21 @@ class OperationsTest extends PerformanceTestCase {
         $this->actAs($this->mgr); $this->postJson($path.'/actions', ['action' => 'cancel', 'reason' => 'Trip postponed'])->assertOk()->assertJsonPath('status', 'cancelled');
         $this->bootTenant('beta'); $this->signIn($this->admin); $this->getJson($path)->assertNotFound();
     }
+    public function test_itinerary_validates_timezone_order_versions_and_freezes_on_submission(): void {
+        $this->actAs($this->emp1);
+        $trip = $this->postJson('/api/v1/travel/requests', ['purpose' => 'Workshop', 'destination' => 'London', 'starts_on' => '2026-11-01', 'ends_on' => '2026-11-03', 'timezone' => 'Europe/London', 'currency' => 'GBP', 'budget' => '100'])->assertCreated()->json();
+        $path = '/api/v1/travel/requests/'.$trip['uuid'];
+        $leg = ['origin' => 'Chennai', 'destination' => 'London', 'departure' => '2026-11-01T09:00:00+05:30', 'arrival' => '2026-11-01T15:00:00+00:00', 'departure_timezone' => 'Asia/Kolkata', 'arrival_timezone' => 'Europe/London'];
+        $this->putJson($path.'/itinerary', ['version' => 0, 'legs' => [$leg]])->assertOk()->assertJsonPath('itinerary_version', 1)->assertJsonPath('itinerary.0.origin', 'Chennai');
+        $this->putJson($path.'/itinerary', ['version' => 0, 'legs' => []])->assertConflict();
+        $this->putJson($path.'/itinerary', ['version' => 1, 'legs' => [array_replace($leg, ['departure' => '2026-11-01T09:00:00+04:30'])]])->assertUnprocessable();
+        $this->putJson($path.'/itinerary', ['version' => 1, 'legs' => [$leg, $leg]])->assertUnprocessable();
+        $this->putJson($path.'/itinerary', ['version' => 1, 'legs' => [array_replace($leg, ['arrival' => '2026-11-04T15:00:00+00:00'])]])->assertUnprocessable();
+        $this->actAs($this->emp2); $this->putJson($path.'/itinerary', ['version' => 1, 'legs' => []])->assertNotFound();
+        $this->actAs($this->emp1);
+        $this->postJson($path.'/actions', ['action' => 'submit'])->assertOk();
+        $this->putJson($path.'/itinerary', ['version' => 1, 'legs' => []])->assertUnprocessable();
+        $this->actAs($this->mgr); $this->getJson($path)->assertOk()->assertJsonCount(1, 'itinerary');
+        $this->bootTenant('beta'); $this->signIn($this->admin); $this->getJson($path)->assertNotFound();
+    }
 }

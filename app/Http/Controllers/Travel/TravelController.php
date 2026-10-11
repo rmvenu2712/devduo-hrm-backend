@@ -15,4 +15,12 @@ final class TravelController {
         $d = $r->validate(['action' => 'required|in:submit,approve,reject,cancel', 'reason' => 'required_unless:action,submit|string|max:1000']);
         return $this->travel->present($this->travel->action($r->user(), $uuid, $d), $r->user());
     }
+    public function itinerary(Request $r, string $uuid) {
+        $d = $r->validate(['version' => 'required|integer|min:0', 'legs' => 'present|array|max:20',
+            'legs.*' => 'array:origin,destination,departure,arrival,departure_timezone,arrival_timezone',
+            'legs.*.origin' => 'required|string|max:200', 'legs.*.destination' => 'required|string|max:200',
+            'legs.*.departure' => 'required|date_format:Y-m-d\TH:i:sP', 'legs.*.arrival' => 'required|date_format:Y-m-d\TH:i:sP',
+            'legs.*.departure_timezone' => 'required|timezone', 'legs.*.arrival_timezone' => 'required|timezone']);
+        return $this->travel->present($this->travel->itinerary($r->user(), $uuid, $d), $r->user());
+    }
 }

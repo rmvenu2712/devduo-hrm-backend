@@ -58,6 +58,7 @@ class WorkController extends Controller
     public function update(Request $r, int $id)
     {
         $task = $this->scoped($r)->findOrFail($id);
+        abort_if($task->source_module === 'workflows', 422, 'Open the linked workflow to complete or decide this task.');
         abort_if(isset($task->metadata['approval_request_id']), 422, 'Open the linked request to approve or reject it. Approval tasks cannot be completed manually.');
         $data = $r->validate(['status' => 'required|in:open,completed']);
 
