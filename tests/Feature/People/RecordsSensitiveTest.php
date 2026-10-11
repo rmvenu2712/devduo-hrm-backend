@@ -52,6 +52,13 @@ class RecordsSensitiveTest extends TestCase
         return json_encode(DB::table($table)->get());
     }
 
+    public function test_generic_local_disk_does_not_serve_private_application_files(): void
+    {
+        $this->assertFalse((bool) config('filesystems.disks.local.serve'));
+        $this->assertStringStartsWith(storage_path('app/private'), config('filesystems.disks.hrm_private.root'));
+        $this->assertSame(storage_path('app/public'), config('filesystems.links.'.public_path('storage')));
+    }
+
     // ---- Identity ------------------------------------------------------------------------------
 
     public function test_identity_is_encrypted_hashed_masked_and_validated_per_country(): void

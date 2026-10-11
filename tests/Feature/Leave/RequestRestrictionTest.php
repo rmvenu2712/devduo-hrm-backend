@@ -27,6 +27,51 @@ class RequestRestrictionTest extends TestCase
         return LeaveRestriction::create($o + ['name' => 'Rule', 'action' => 'warn', 'target_type' => 'tenant', 'target_id' => '*']);
     }
 
+    public function test_policy_max_consecutive_counts_adjacent_pending_requests_of_the_same_leave_type(): void
+    {
+        $this->policy(['limits' => ['max_consecutive' => 2]]);
+        $this->as($this->emp)->postJson('/api/v1/leave/requests', $this->leaveBody())->assertCreated();
+
+        $next = $this->leaveBody(['start_date' => '2026-10-14', 'end_date' => '2026-10-14']);
+        $blocked = $this->as($this->emp)->postJson('/api/v1/leave/requests/preview', $next)->assertOk()->json('data');
+        $this->assertFalse($blocked['can_submit']);
+        $limit = collect($blocked['conflicts'])->firstWhere('kind', 'max_consecutive');
+        $this->assertNotNull($limit);
+        $this->assertSame(3, $limit['detail']['span']);
+        $this->assertSame(1, $limit['detail']['adjacent_requests']);
+
+        $afterGap = $this->leaveBody(['start_date' => '2026-10-15', 'end_date' => '2026-10-15']);
+        $allowed = $this->as($this->emp)->postJson('/api/v1/leave/requests/preview', $afterGap)->assertOk()->json('data');
+        $this->assertTrue($allowed['can_submit']);
+        $this->assertFalse(collect($allowed['conflicts'])->contains('kind', 'max_consecutive'));
+    }
+
+    public function test_consecutive_restriction_counts_adjacent_pending_requests(): void
+    {
+        $this->as($this->emp)->postJson('/api/v1/leave/requests', $this->leaveBody())->assertCreated();
+        $this->restrict(['name' => 'Consecutive leave review', 'kind' => 'consecutive', 'action' => 'block', 'params' => ['max_days' => 2]]);
+
+        $next = $this->leaveBody(['start_date' => '2026-10-14', 'end_date' => '2026-10-14']);
+        $preview = $this->as($this->emp)->postJson('/api/v1/leave/requests/preview', $next)->assertOk()->json('data');
+        $conflict = collect($preview['conflicts'])->firstWhere('kind', 'consecutive');
+        $this->assertFalse($preview['can_submit']);
+        $this->assertNotNull($conflict);
+        $this->assertSame(3, $conflict['detail']['span']);
+    }
+
+    public function test_partial_cancellation_breaks_a_consecutive_chain_at_the_cancelled_date(): void
+    {
+        $uuid = $this->as($this->emp)->postJson('/api/v1/leave/requests', $this->leaveBody(['end_date' => '2026-10-14']))->assertCreated()->json('data.uuid');
+        $this->as($this->boss)->postJson("/api/v1/leave/requests/$uuid/approve")->assertOk();
+        $this->as($this->emp)->postJson("/api/v1/leave/requests/$uuid/cancel", ['dates' => ['2026-10-13']])->assertOk()->assertJsonPath('data.status', 'partially_cancelled');
+        $this->policy(['limits' => ['max_consecutive' => 2]]);
+
+        $next = $this->leaveBody(['start_date' => '2026-10-15', 'end_date' => '2026-10-15']);
+        $preview = $this->as($this->emp)->postJson('/api/v1/leave/requests/preview', $next)->assertOk()->json('data');
+        $this->assertTrue($preview['can_submit']);
+        $this->assertFalse(collect($preview['conflicts'])->contains('kind', 'max_consecutive'));
+    }
+
     public function test_blackout_blocks_ordinary_leave_but_escalates_statutory_leave_to_hr(): void
     {
         $this->restrict(['name' => 'Year-end close', 'kind' => 'blackout', 'action' => 'block', 'start_date' => '2026-10-12', 'end_date' => '2026-10-16', 'params' => ['reason' => 'audit']]);

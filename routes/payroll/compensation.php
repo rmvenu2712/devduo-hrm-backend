@@ -23,6 +23,12 @@ Route::post('compensations/{uuid}/decision', [Comp::class, 'decideCompensation']
 
 Route::get('revisions', [Comp::class, 'revisions'])->middleware('permission:payroll.compensation.view');
 Route::post('revisions/preview', [Comp::class, 'previewRevision'])->middleware('permission:payroll.compensation.manage');
+Route::post('revision-batches/preview', [Comp::class, 'previewRevisionBatch'])->middleware('permission:payroll.compensation.manage');
+Route::post('revision-batches', [Comp::class, 'submitRevisionBatch'])->middleware('permission:payroll.compensation.manage');
+Route::get('revision-batches', [Comp::class, 'revisionBatches'])->middleware('permission:payroll.compensation.view');
+Route::get('revision-batches/{uuid}', [Comp::class, 'showRevisionBatch'])->middleware('permission:payroll.compensation.view');
+Route::post('imports/compensation/preview', [Comp::class, 'previewCompensationImport'])->middleware('permission:payroll.compensation.manage');
+Route::post('imports/compensation/{uuid}/commit', [Comp::class, 'commitCompensationImport'])->middleware('permission:payroll.compensation.manage');
 Route::post('revisions', [Comp::class, 'proposeRevision'])->middleware('permission:payroll.compensation.manage');
 Route::get('revisions/{uuid}', [Comp::class, 'showRevision'])->middleware('permission:payroll.compensation.view');
 Route::post('revisions/{uuid}/decision', [Comp::class, 'decideRevision'])->middleware('permission:payroll.compensation.approve');

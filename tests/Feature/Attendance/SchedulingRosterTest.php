@@ -369,6 +369,40 @@ class SchedulingRosterTest extends TestCase
         $this->assertGreaterThanOrEqual(2, DomainEvent::where('type', 'ShiftChanged')->whereIn('employee_id', [$asha->id, $ben->id])->count());
     }
 
+    public function test_shift_swap_can_exchange_different_dates_and_revalidates_both_assignments(): void
+    {
+        $boss = $this->hire('Maya Chen', ['role' => 'Manager']);
+        $asha = $this->hire('Asha Rao', ['manager' => $boss, 'role' => 'Team member']);
+        $ben = $this->hire('Ben Lee', ['manager' => $boss, 'role' => 'Team member']);
+        $a = $this->shift('A');
+        $b = $this->shift('B', '14:00', '22:00');
+        $this->week_all();
+        $r = $this->roster('2026-11-02', '2026-11-15');
+        $this->set($r, $asha, '2026-11-09', $a);
+        $this->set($r, $ben, '2026-11-10', $b);
+        $this->svc()->publish($r, $this->admin, true);
+
+        $ashaUser = \App\Models\User::find(\DB::table('people')->where('id', $asha->person_id)->value('user_id'));
+        $benUser = \App\Models\User::find(\DB::table('people')->where('id', $ben->person_id)->value('user_id'));
+        $bossUser = \App\Models\User::find(\DB::table('people')->where('id', $boss->person_id)->value('user_id'));
+        $this->signIn($ashaUser);
+        $created = $this->postJson('/api/v1/shift-swaps', [
+            'type' => 'swap', 'work_date' => '2026-11-09', 'counterpart_date' => '2026-11-10', 'counterpart_uuid' => $ben->uuid, 'reason' => 'Family event',
+        ])->assertCreated()->assertJsonPath('data.counterpart_date', '2026-11-10');
+        $uuid = $created->json('data.uuid');
+
+        $this->signIn($benUser);
+        $this->postJson("/api/v1/shift-swaps/$uuid/respond", ['accept' => true])->assertOk();
+        $this->signIn($bossUser);
+        $this->postJson("/api/v1/shift-swaps/$uuid/decision", ['approve' => true])->assertOk()->assertJsonPath('data.status', 'approved');
+
+        $this->context($ashaUser->tenant_id);
+        $resolver = app(\App\Domain\Attendance\Contracts\ScheduleResolver::class);
+        $this->assertSame('B', $resolver->resolve($asha->id, '2026-11-09')->shiftCode);
+        $this->assertSame('A', $resolver->resolve($ben->id, '2026-11-10')->shiftCode);
+        $this->assertSame(2, RosterEntry::where('status', 'superseded')->count());
+    }
+
     private function week_all(): void
     {
         $w = app(\App\Domain\Attendance\Scheduling\WorkWeekService::class)->create(['name' => 'All', 'code' => 'ALL', 'days' => array_fill(1, 7, 'full'), 'effective_from' => '2026-01-01'], $this->admin);

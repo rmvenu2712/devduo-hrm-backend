@@ -19,6 +19,7 @@ use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -128,6 +129,36 @@ final class RequestService
         });
     }
 
+    /** Expire a pending request after its tenant-configured window; safe to call repeatedly from maintenance. */
+    public function expireIfOverdue(LeaveRequest $request, ?int $days = null): bool
+    {
+        $days ??= LeaveSettings::get('requests.pending_expiry_days', 90);
+        if (! $days || $days < 1) {
+            return false;
+        }
+
+        return DB::transaction(function () use ($request, $days) {
+            $r = LeaveRequest::query()->whereKey($request->id)->lockForUpdate()->first();
+            if (! $r || $r->status !== 'pending') {
+                return false;
+            }
+            $submitted = CarbonImmutable::parse($r->submitted_at ?? $r->created_at);
+            if ($submitted->addDays($days)->isFuture()) {
+                return false;
+            }
+
+            $this->releaseAll($r, null, 'Expired after '.$days.' days without a decision');
+            $r->update(['status' => 'expired', 'decided_at' => now(), 'charged_units' => '0.0000']);
+            $this->log($r, null, 'expire', (int) $r->current_step, 'pending', 'expired', 'No decision before the configured expiry window.', null, ['expiry_days' => $days]);
+            $this->support->completeTasks('leave:'.$r->uuid);
+            $employee = Employee::query()->find($r->employee_id);
+            $this->support->notify($employee ? $this->approvers->userIdOf($employee) : null, 'Leave request expired', 'Your leave request from '.$r->start_date.' expired without a decision. Submit it again if it is still needed, or contact HR.', "leave:{$r->uuid}:expired", '/leave/my');
+            Audit::record('expired', 'leave', 'request:'.$r->uuid, ['expiry_days' => $days]);
+
+            return true;
+        });
+    }
+
     /**
      * Cancel a request or just some of its days. Pending: the holds for those days are released. Approved: the consumption is
      * reversed (never edited) and Attendance is told the coverage changed. Past days of approved leave, and anything in a locked
@@ -232,7 +263,7 @@ final class RequestService
 
     private function storeDocument(User $actor, LeaveRequest $request, LeaveType $type, UploadedFile $file, ?string $kind): LeaveRequestDocument
     {
-        $uuid = (string) \Illuminate\Support\Str::uuid();
+        $uuid = (string) Str::uuid();
         $stored = $this->support->storeFile($file, $uuid);
         $sensitive = (bool) $type->is_sensitive;
         $retention = $sensitive ? (int) LeaveSettings::get('privacy.medical_retention_days', 2555) : null;

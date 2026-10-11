@@ -24,8 +24,8 @@ final class LeaveSettings
 {
     public const DEFAULTS = [
         'units' => ['minutes_per_day' => 480, 'minutes_per_half_day' => 240, 'minutes_per_quarter_day' => 120, 'rounding' => 'nearest'],
-        'balance' => ['allow_negative_default' => false, 'default_negative_limit' => '0.0000', 'maker_checker' => true],
-        'requests' => ['backdate_days' => 7, 'future_days' => 365, 'advance_notice_days' => 0, 'allow_withdraw_after_approval' => true, 'require_reason' => false],
+        'balance' => ['allow_negative_default' => false, 'default_negative_limit' => '0.0000', 'carry_negative_forward' => true, 'maker_checker' => true],
+        'requests' => ['backdate_days' => 7, 'future_days' => 365, 'advance_notice_days' => 0, 'pending_expiry_days' => 90, 'allow_withdraw_after_approval' => true, 'require_reason' => false],
         'approvals' => ['steps' => ['manager'], 'escalate_after_hours' => 48, 'auto_approve_for_hr' => false],
         'accrual' => ['run_day_of_month' => 1, 'catch_up_days' => 3, 'nightly_enabled' => true, 'auto_carry_forward' => false],
         'expiry' => ['notify_days_before' => [30, 7]],

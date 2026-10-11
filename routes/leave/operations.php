@@ -4,6 +4,7 @@ use App\Http\Controllers\Leave\Operations\InsightController;
 use App\Http\Controllers\Leave\Operations\LockController;
 use App\Http\Controllers\Leave\Operations\PayrollController;
 use App\Http\Controllers\Leave\Operations\ReportController;
+use App\Http\Controllers\Leave\Operations\SettingsController;
 use App\Http\Controllers\Leave\Operations\TransferController;
 use Illuminate\Support\Facades\Route;
 
@@ -15,6 +16,9 @@ use Illuminate\Support\Facades\Route;
  */
 
 // ---- locks (maker-checker unlock) -----------------------------------------------------------------------
+Route::get('settings', [SettingsController::class, 'show'])->middleware('permission:leave.manage|leave.policy.manage');
+Route::put('settings', [SettingsController::class, 'update'])->middleware('permission:leave.manage|leave.policy.manage');
+
 Route::get('locks', [LockController::class, 'index'])->middleware('permission:leave.lock|leave.unlock|leave.manage');
 Route::post('locks/preview', [LockController::class, 'preview'])->middleware('permission:leave.lock');
 Route::post('locks', [LockController::class, 'store'])->middleware('permission:leave.lock');

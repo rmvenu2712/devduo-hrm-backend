@@ -6,6 +6,7 @@ use App\Domain\Access\Classification;
 use App\Domain\Access\PeopleSettings;
 use App\Domain\Audit\Audit;
 use App\Domain\Events\DomainEvents;
+use App\Domain\People\Config\CustomFieldService;
 use App\Domain\People\Models\Employee;
 use App\Domain\People\Models\Person;
 use App\Domain\Tenancy\TenantClock;
@@ -92,6 +93,8 @@ final class EmployeeService
                 'reason' => null, 'effective_date' => $joined, 'changed_by' => auth()->id(), 'created_at' => now(), 'updated_at' => now()]);
 
             $this->assignments->change($employee, $assignment + ['work_mode' => $assignment['work_mode'] ?? 'onsite'], $joined, ['change_type' => 'initial', 'source' => $opts['source'] ?? 'manual', 'reason' => isset($opts['rehire_of']) ? 'Rehire' : 'Joined']);
+            // Resolve applicable definitions only after the initial assignment exists (employee-type scoped fields).
+            app(CustomFieldService::class)->applyDefaults($employee);
             if (! empty($data['manager_id'])) {
                 $manager = Employee::query()->findOrFail($data['manager_id']);
                 $this->reporting->assign($employee, $manager, 'primary', $joined, 'Initial reporting line', $opts['source'] ?? 'manual');

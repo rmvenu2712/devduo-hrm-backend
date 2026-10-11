@@ -5,8 +5,13 @@ namespace App\Domain\Payroll\Compensation;
 use App\Domain\Access\DataScope;
 use App\Domain\Audit\Audit;
 use App\Domain\Events\DomainEvents;
-use App\Domain\Payroll\Models\{CompensationRevision, EmployeeCompensation, PayrollGroup, SalaryStructure};
-use App\Domain\Payroll\Support\{Decimal, PayrollEvents, PayrollStates, Rounding};
+use App\Domain\Payroll\Models\CompensationRevision;
+use App\Domain\Payroll\Models\CompensationRevisionBatch;
+use App\Domain\Payroll\Models\EmployeeCompensation;
+use App\Domain\Payroll\Models\SalaryStructure;
+use App\Domain\Payroll\Support\Decimal;
+use App\Domain\Payroll\Support\PayrollEvents;
+use App\Domain\Payroll\Support\Rounding;
 use App\Domain\People\Models\Employee;
 use App\Domain\Work\TaskService;
 use App\Models\User;
@@ -35,7 +40,8 @@ final class RevisionService
         $group = $old->group;
         $structure = isset($data['structure_uuid']) ? SalaryStructure::where('uuid', $data['structure_uuid'])->where('status', 'active')->firstOrFail() : $old->structure;
         $built = $this->calc->build($data['lines'], $group, $data['effective_date'], null, $structure);
-        $oldGross = $old->gross_reference ?? '0'; $newGross = $built['summary']['gross_reference'];
+        $oldGross = $old->gross_reference ?? '0';
+        $newGross = $built['summary']['gross_reference'];
         $delta = (string) Decimal::sub($newGross, $oldGross);
         $pct = Decimal::isZero($oldGross) ? null : Rounding::apply(Decimal::mul(Decimal::div($delta, $oldGross, 8), 100), 2);
 
@@ -48,13 +54,20 @@ final class RevisionService
     public function propose(User $actor, array $data): CompensationRevision
     {
         abort_unless($actor->allows('payroll.compensation.manage'), 403);
+
         return DB::transaction(function () use ($actor, $data) {
             $hash = RequestFingerprint::make($data);
             $existing = CompensationRevision::where('idempotency_key', $data['idempotency_key'])->first();
-            if ($existing) { abort_unless($existing->initiator_id === $actor->id && hash_equals((string) $existing->request_hash, $hash), 409, 'Request key already belongs to another operation.'); return $existing; }
+            if ($existing) {
+                abort_unless($existing->initiator_id === $actor->id && hash_equals((string) $existing->request_hash, $hash), 409, 'Request key already belongs to another operation.');
+
+                return $existing;
+            }
             $employee = app(DataScope::class)->constrain(Employee::query(), $actor, 'payroll.compensation.manage')->where('uuid', $data['employee_uuid'])->lockForUpdate()->firstOrFail();
             $old = $this->oldFor($employee, $data['effective_date']);
-            if (CompensationRevision::where('employee_id', $employee->id)->where('status', 'pending')->exists()) throw ValidationException::withMessages(['employee_uuid' => 'This employee already has a revision awaiting approval.']);
+            if (CompensationRevision::where('employee_id', $employee->id)->where('status', 'pending')->exists()) {
+                throw ValidationException::withMessages(['employee_uuid' => 'This employee already has a revision awaiting approval.']);
+            }
             $preview = $this->preview($actor, $data);
             $new = $this->compensations->create($actor, [
                 'employee_uuid' => $employee->uuid, 'group_uuid' => $old->group->uuid, 'structure_uuid' => $data['structure_uuid'] ?? $old->structure?->uuid, 'effective_from' => $data['effective_date'],
@@ -75,6 +88,7 @@ final class RevisionService
         abort_unless($actor->allows('payroll.compensation.approve'), 403);
         $initial = CompensationRevision::where('uuid', $uuid)->firstOrFail();
         abort_unless(app(DataScope::class)->canAccess($actor, $initial->employee_id, 'payroll.compensation.approve'), 404);
+
         return DB::transaction(function () use ($actor, $initial, $decision) {
             Employee::whereKey($initial->employee_id)->lockForUpdate()->firstOrFail();
             $rev = CompensationRevision::whereKey($initial->id)->lockForUpdate()->firstOrFail();
@@ -84,8 +98,11 @@ final class RevisionService
             $this->compensations->settle($new, $decision, $actor, true);
             $rev->update(['status' => $decision === 'approved' ? 'applied' : 'rejected', 'approver_id' => $actor->id, 'decided_at' => now()]);
             app(TaskService::class)->completeBySource('payroll', 'revision:'.$rev->uuid);
-            if ($decision === 'approved') app(DomainEvents::class)->record(PayrollEvents::COMPENSATION_REVISED, ['employee' => $rev->employee_id, 'summary' => 'Compensation revised', 'effective_date' => substr((string) $rev->effective_date, 0, 10),
-                'actor_id' => $actor->id, 'payload' => ['revision_uuid' => $rev->uuid, 'type' => $rev->type, 'backdated' => substr((string) $rev->effective_date, 0, 10) < now()->toDateString()]]);
+            if ($decision === 'approved') {
+                app(DomainEvents::class)->record(PayrollEvents::COMPENSATION_REVISED, ['employee' => $rev->employee_id, 'summary' => 'Compensation revised', 'effective_date' => substr((string) $rev->effective_date, 0, 10),
+                    'actor_id' => $actor->id, 'payload' => ['revision_uuid' => $rev->uuid, 'type' => $rev->type, 'backdated' => substr((string) $rev->effective_date, 0, 10) < now()->toDateString()]]);
+            }
+            $this->syncBatch($rev, $actor);
             Audit::record('revision.'.$decision, 'payroll', $rev->uuid);
 
             return $rev;
@@ -101,6 +118,7 @@ final class RevisionService
             EmployeeCompensation::whereKey($rev->new_compensation_id)->update(['status' => 'cancelled']);
             $rev->update(['status' => 'cancelled']);
             app(TaskService::class)->completeBySource('payroll', 'revision:'.$rev->uuid);
+            $this->syncBatch($rev, $actor);
             Audit::record('revision.cancelled', 'payroll', $rev->uuid);
 
             return $rev;
@@ -110,11 +128,30 @@ final class RevisionService
     public function present(CompensationRevision $r, bool $reveal): array
     {
         $r->loadMissing(['employee.person']);
-        $oldC = EmployeeCompensation::find($r->old_compensation_id); $newC = EmployeeCompensation::find($r->new_compensation_id);
+        $oldC = EmployeeCompensation::find($r->old_compensation_id);
+        $newC = EmployeeCompensation::find($r->new_compensation_id);
 
         return ['uuid' => $r->uuid, 'employee_uuid' => $r->employee->uuid, 'employee_name' => $r->employee->person->display_name, 'type' => $r->type, 'status' => $r->status,
             'effective_date' => substr((string) $r->effective_date, 0, 10), 'reason' => $r->reason, 'comments' => $r->comments, 'letter_reference' => $r->letter_reference,
             'old_compensation_uuid' => $oldC?->uuid, 'new_compensation_uuid' => $newC?->uuid, 'can_review' => auth()->id() !== $r->initiator_id && $r->status === 'pending',
             'backdated' => substr((string) $r->effective_date, 0, 10) < substr((string) $r->created_at, 0, 10), 'masked' => ! $reveal, 'preview' => $reveal ? $r->preview : null];
+    }
+
+    private function syncBatch(CompensationRevision $revision, User $actor): void
+    {
+        if (! $revision->batch_id) {
+            return;
+        }
+        $batch = CompensationRevisionBatch::query()->whereKey($revision->batch_id)->lockForUpdate()->first();
+        if (! $batch || $batch->status !== 'submitted') {
+            return;
+        }
+        $rows = CompensationRevision::query()->where('batch_id', $batch->id)->get(['status']);
+        if ($rows->contains(fn ($row) => $row->status === 'pending')) {
+            return;
+        }
+        $applied = $rows->where('status', 'applied')->count();
+        $batch->update(['status' => $applied === $rows->count() && (int) $batch->employees_failed === 0 ? 'applied' : ($applied > 0 ? 'partially_applied' : 'cancelled'),
+            'approved_by' => $applied > 0 ? $actor->id : null, 'approved_at' => $applied > 0 ? now() : null]);
     }
 }

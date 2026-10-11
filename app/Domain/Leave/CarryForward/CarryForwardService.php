@@ -16,6 +16,7 @@ use App\Domain\Leave\Models\LeaveAccount;
 use App\Domain\Leave\Models\LeaveCarryForward;
 use App\Domain\Leave\Models\LeaveType;
 use App\Domain\Leave\Support\LeaveEvents;
+use App\Domain\Leave\Support\LeaveSettings;
 use App\Domain\Leave\Support\Units;
 use App\Domain\People\Models\Employee;
 use App\Domain\Tenancy\TenantClock;
@@ -23,6 +24,7 @@ use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 
 /**
  * Period close: expire what is due, carry forward per policy, forfeit the rest, close the account.
@@ -110,7 +112,7 @@ final class CarryForwardService
                 return $this->store($row, $account, $key, $values, 'preview', $plan['calculation']);
             }
 
-            return DB::transaction(function () use ($account, $key, $row, $values, $plan, $end, $resolved, $user) {
+            return DB::transaction(function () use ($account, $key, $row, $values, $plan, $end, $user) {
                 $meta = ['carry_run' => $key, 'system' => true];
                 $forfeitEntry = null;
                 $out = $in = $to = null;
@@ -132,11 +134,11 @@ final class CarryForwardService
                 return $this->store($row, $account, $key, $values, 'posted', $plan['calculation'] + ['forfeit_entry_id' => $forfeitEntry?->id]);
             });
         } catch (\Throwable $e) {
-            if (! ($e instanceof \Symfony\Component\HttpKernel\Exception\HttpException)) {
+            if (! ($e instanceof HttpException)) {
                 report($e);
             }
 
-            return $this->store($row, $account, $key, $values, 'failed', ['error' => $e instanceof \Symfony\Component\HttpKernel\Exception\HttpException ? $e->getMessage() : 'Unexpected error: '.class_basename($e)]);
+            return $this->store($row, $account, $key, $values, 'failed', ['error' => $e instanceof HttpException ? $e->getMessage() : 'Unexpected error: '.class_basename($e)]);
         }
     }
 
@@ -149,6 +151,13 @@ final class CarryForwardService
         $calc = ['available' => $b->available, 'pending' => $b->pending, 'scheduled' => $b->scheduled, 'carry_rule' => $carry];
         if (! Units::isZero($b->pending) || ! Units::isZero($b->scheduled)) {
             return ['mode' => $mode, 'eligible' => '0.0000', 'carried' => '0.0000', 'forfeited' => '0.0000', 'valid_until' => null, 'blocked' => true, 'calculation' => $calc + ['reason' => 'open_reservations']];
+        }
+        if (Units::isNegative($b->available)) {
+            $debt = LeaveSettings::get('balance.carry_negative_forward', true) ? $b->available : '0.0000';
+            $calc += ['negative_balance' => $b->available, 'negative_carry_forward_enabled' => (bool) LeaveSettings::get('balance.carry_negative_forward', true)];
+
+            return ['mode' => $mode, 'eligible' => $debt, 'carried' => $debt, 'forfeited' => '0.0000', 'valid_until' => null, 'blocked' => false,
+                'calculation' => $calc + ['eligible' => $debt, 'carried' => $debt, 'note' => Units::isZero($debt) ? 'negative_balance_not_carried_by_setting' : 'negative_balance_carried']];
         }
         $expiring = '0.0000';
         if ($subtractExpiring) {
@@ -170,7 +179,7 @@ final class CarryForwardService
             $carried = Units::min($carried, Units::normalize($carry['cap']));
         }
         $next = CarbonImmutable::parse($end)->addDay()->toDateString();
-        if ($rule['max_balance'] !== null && ! Units::isZero($carried)) {
+        if ($rule['max_balance'] !== null && Units::cmp($carried, '0') > 0) {
             $joined = Employee::query()->whereKey($account->employee_id)->value('joined_on');
             $np = $this->periods->forDate($joined ? substr((string) $joined, 0, 10) : null, $rule['cycle'], $next);
             $existing = $this->accounts->find($account->employee_id, $account->leave_type_id, $np['start']);
@@ -185,9 +194,6 @@ final class CarryForwardService
             $validUntil = CarbonImmutable::parse($next)->addDays((int) $carry['valid_days'] - 1)->toDateString();
         } elseif (! empty($carry['valid_months'])) {
             $validUntil = CarbonImmutable::parse($next)->addMonthsNoOverflow((int) $carry['valid_months'])->subDay()->toDateString();
-        }
-        if (Units::isNegative($b->available)) {
-            $calc['note'] = 'negative_balance_not_carried';
         }
 
         return ['mode' => $mode, 'eligible' => $eligible, 'carried' => $carried, 'forfeited' => Units::sub($eligible, $carried), 'valid_until' => $validUntil, 'blocked' => false,

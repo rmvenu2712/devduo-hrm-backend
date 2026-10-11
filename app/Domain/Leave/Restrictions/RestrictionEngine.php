@@ -7,6 +7,7 @@ use App\Domain\Attendance\Scheduling\OrgContext;
 use App\Domain\Leave\Contracts\Dto\DurationResult;
 use App\Domain\Leave\Duration\RuleSet;
 use App\Domain\Leave\Models\LeaveDocumentRule;
+use App\Domain\Leave\Models\LeaveRequest;
 use App\Domain\Leave\Models\LeaveRestriction;
 use App\Domain\Leave\Models\LeaveType;
 use App\Domain\Leave\Support\LeaveSettings;
@@ -51,6 +52,21 @@ final class RestrictionEngine
         }
         $statutory = $this->isStatutory($type);
 
+        // A policy's max_consecutive limit applies to the contiguous chain of this employee's pending/approved requests for the same type.
+        // DurationEngine already handles a single request that exceeds the limit; this adds adjacent requests to that span.
+        $maxConsecutive = $rules->get('max_consecutive');
+        $requestSpan = (int) CarbonImmutable::parse($dates[0])->diffInDays(CarbonImmutable::parse(end($dates))) + 1;
+        if ($maxConsecutive !== null && $requestSpan <= (int) $maxConsecutive) {
+            [$chainStart, $chainEnd, $adjacentCount] = $this->consecutiveChain($employee->id, $type->id, $dates[0], end($dates), $ignoreRequestId);
+            $chainSpan = (int) CarbonImmutable::parse($chainStart)->diffInDays(CarbonImmutable::parse($chainEnd)) + 1;
+            if ($chainSpan > (int) $maxConsecutive) {
+                $conflict = ['kind' => 'max_consecutive', 'severity' => 'block',
+                    'message' => "{$type->name} cannot run for more than $maxConsecutive consecutive days (this request would extend the existing leave chain to $chainSpan).",
+                    'detail' => ['max' => (int) $maxConsecutive, 'span' => $chainSpan, 'request_span' => $requestSpan, 'chain_start' => $chainStart, 'chain_end' => $chainEnd, 'adjacent_requests' => $adjacentCount]];
+                $out[] = $this->soften($conflict, $statutory, true);
+            }
+        }
+
         // ---- overlap with the employee's own pending / approved leave (a fact, never downgraded) -----
         foreach ($this->overlaps($employee->id, $segments, $ignoreRequestId) as $o) {
             $out[] = ['kind' => 'overlap', 'severity' => 'block', 'message' => "You already have leave on {$o['date']} ({$o['status']}).", 'detail' => $o];
@@ -85,7 +101,7 @@ final class RestrictionEngine
             $out[] = $this->soften(['kind' => 'eligibility', 'severity' => 'block', 'message' => $reason, 'detail' => []], $statutory, true);
         }
         // ---- configured restrictions (blackout, staffing, concurrency, ...) --------------------------------
-        foreach ($this->restrictions($employee, $type, $dates) as $hit) {
+        foreach ($this->restrictions($employee, $type, $dates, $ignoreRequestId) as $hit) {
             $out[] = $hit['conflict'] + ['restriction_id' => $hit['id']];
         }
         // ---- required documents ---------------------------------------------------------------------------
@@ -149,6 +165,72 @@ final class RestrictionEngine
         return $hits;
     }
 
+    /** @return array{0:string,1:string,2:int} contiguous date range and number of related existing requests */
+    private function consecutiveChain(int $employeeId, int $leaveTypeId, string $from, string $to, ?int $ignoreRequestId): array
+    {
+        $start = $from;
+        $end = $to;
+        $known = [];
+        $connected = [];
+        $changed = true;
+
+        while ($changed) {
+            $changed = false;
+            $rows = LeaveRequest::query()->where('employee_id', $employeeId)->where('leave_type_id', $leaveTypeId)
+                ->whereIn('status', ['pending', 'approved', 'partially_cancelled'])
+                ->when($ignoreRequestId, fn ($q) => $q->whereKeyNot($ignoreRequestId))
+                ->where('start_date', '<=', CarbonImmutable::parse($end)->addDay()->toDateString())
+                ->where('end_date', '>=', CarbonImmutable::parse($start)->subDay()->toDateString())
+                ->with(['segments' => fn ($q) => $q->where('status', 'active')])
+                ->get();
+
+            foreach ($rows as $request) {
+                if (isset($known[$request->id])) {
+                    continue;
+                }
+                $known[$request->id] = $request->status === 'partially_cancelled'
+                    ? $this->activeDateRuns($request->segments->pluck('leave_date')->map(fn ($date) => substr((string) $date, 0, 10))->all())
+                    : [[substr((string) $request->start_date, 0, 10), substr((string) $request->end_date, 0, 10)]];
+            }
+
+            foreach ($known as $requestId => $ranges) {
+                foreach ($ranges as [$requestStart, $requestEnd]) {
+                    if ($requestStart > CarbonImmutable::parse($end)->addDay()->toDateString() || $requestEnd < CarbonImmutable::parse($start)->subDay()->toDateString()) {
+                        continue;
+                    }
+                    $connected[$requestId] = true;
+                    $nextStart = min($start, $requestStart);
+                    $nextEnd = max($end, $requestEnd);
+                    if ($nextStart !== $start || $nextEnd !== $end) {
+                        $start = $nextStart;
+                        $end = $nextEnd;
+                        $changed = true;
+                    }
+                }
+            }
+        }
+
+        return [$start, $end, count($connected)];
+    }
+
+    /** @param array<int,string> $dates @return array<int,array{0:string,1:string}> */
+    private function activeDateRuns(array $dates): array
+    {
+        $dates = array_values(array_unique($dates));
+        sort($dates);
+        $ranges = [];
+        foreach ($dates as $date) {
+            $last = array_key_last($ranges);
+            if ($last !== null && CarbonImmutable::parse($ranges[$last][1])->addDay()->toDateString() === $date) {
+                $ranges[$last][1] = $date;
+            } else {
+                $ranges[] = [$date, $date];
+            }
+        }
+
+        return $ranges;
+    }
+
     /** @return array<int,string> reasons the employee is not eligible (empty = eligible) */
     private function eligibility(Employee $employee, LeaveType $type, RuleSet $rules, string $date): array
     {
@@ -187,7 +269,7 @@ final class RestrictionEngine
     }
 
     /** @return array<int,array{id:int,conflict:array<string,mixed>}> */
-    private function restrictions(Employee $employee, LeaveType $type, array $dates): array
+    private function restrictions(Employee $employee, LeaveType $type, array $dates, ?int $ignoreRequestId = null): array
     {
         $from = $dates[0];
         $to = end($dates);
@@ -234,7 +316,7 @@ final class RestrictionEngine
                         $available = max(0, count($peers) - $away);
                         $need = isset($params['min_percent']) ? (float) $params['min_percent'] * count($peers) / 100 : (float) ($params['min_available'] ?? 1);
                         if ($peers && $available < $need) {
-                            $messages[] = "{$r->name}: only ".rtrim(rtrim(number_format($available, 2), '0'), '.')." of ".count($peers)." people would be available on $date (minimum ".rtrim(rtrim(number_format($need, 2), '0'), '.').').';
+                            $messages[] = "{$r->name}: only ".rtrim(rtrim(number_format($available, 2), '0'), '.').' of '.count($peers)." people would be available on $date (minimum ".rtrim(rtrim(number_format($need, 2), '0'), '.').').';
                             break;
                         }
                     }
@@ -246,9 +328,11 @@ final class RestrictionEngine
                     }
                     break;
                 case 'consecutive':
-                    $span = (int) CarbonImmutable::parse($from)->diffInDays(CarbonImmutable::parse($to)) + 1;
+                    [$chainStart, $chainEnd, $related] = $this->consecutiveChain($employee->id, $type->id, $from, $to, $ignoreRequestId);
+                    $span = (int) CarbonImmutable::parse($chainStart)->diffInDays(CarbonImmutable::parse($chainEnd)) + 1;
                     if ($span > (int) ($params['max_days'] ?? PHP_INT_MAX)) {
-                        $messages[] = "{$r->name}: more than {$params['max_days']} consecutive days needs a review (this is $span).";
+                        $messages[] = "{$r->name}: more than {$params['max_days']} consecutive days needs a review (this request would extend the existing leave chain to $span).";
+                        $base['detail'] += ['span' => $span, 'chain_start' => $chainStart, 'chain_end' => $chainEnd, 'adjacent_requests' => $related];
                     }
                     break;
                 case 'eligibility':

@@ -33,7 +33,9 @@ return [
         'local' => [
             'driver' => 'local',
             'root' => storage_path('app/private'),
-            'serve' => true,
+            // The local root contains app-private files. Serve sensitive files only through
+            // their domain-authorized download controllers, never generic signed local URLs.
+            'serve' => false,
             'throw' => false,
             'report' => false,
         ],

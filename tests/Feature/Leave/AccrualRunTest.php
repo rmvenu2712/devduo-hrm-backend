@@ -4,13 +4,19 @@ namespace Tests\Feature\Leave;
 
 use App\Domain\Leave\Accrual\AccountService;
 use App\Domain\Leave\Accrual\AccrualRunService;
+use App\Domain\Leave\CarryForward\CarryForwardService;
+use App\Domain\Leave\Contracts\LeaveLockGuard;
 use App\Domain\Leave\Expiry\ConsumptionPlanner;
 use App\Domain\Leave\Expiry\ExpiryService;
 use App\Domain\Leave\Ledger\BalanceService;
 use App\Domain\Leave\Ledger\LedgerPosting;
 use App\Domain\Leave\Ledger\LedgerService;
+use App\Domain\Leave\Locks\DatabaseLeaveLockGuard;
 use App\Domain\Leave\Models\LeaveAccount;
 use App\Domain\Leave\Models\LeaveLedgerEntry;
+use App\Domain\Leave\Models\LeaveLock;
+use App\Domain\Leave\Support\Units;
+use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 class AccrualRunTest extends AccrualTestCase
@@ -34,7 +40,7 @@ class AccrualRunTest extends AccrualTestCase
         $preview = $runs->preview($params);
         $this->assertSame('preview', $preview->status);
         $this->assertSame(0, LeaveLedgerEntry::query()->count());
-        $this->assertSame('2.0000', $preview->items()->first()->getRawOriginal('units') === null ? '' : \App\Domain\Leave\Support\Units::normalize($preview->items()->first()->getRawOriginal('units')));
+        $this->assertSame('2.0000', $preview->items()->first()->getRawOriginal('units') === null ? '' : Units::normalize($preview->items()->first()->getRawOriginal('units')));
 
         $run = $runs->run($params);
         $this->assertSame('completed', $run->status);
@@ -58,8 +64,8 @@ class AccrualRunTest extends AccrualTestCase
         $a = $this->hire('Asha Rao', ['joined_on' => '2025-01-01']);
         $b = $this->hire('Bela Das', ['joined_on' => '2025-01-01']);
         // Lock Bela's period: her posting fails (423) both on the date and the fallback date -> failed item, Asha unaffected.
-        \App\Domain\Leave\Models\LeaveLock::query()->getModel();
-        $this->app->bind(\App\Domain\Leave\Contracts\LeaveLockGuard::class, fn () => new class($b->id) implements \App\Domain\Leave\Contracts\LeaveLockGuard
+        LeaveLock::query()->getModel();
+        $this->app->bind(LeaveLockGuard::class, fn () => new class($b->id) implements LeaveLockGuard
         {
             public function __construct(public int $blocked) {}
 
@@ -88,7 +94,7 @@ class AccrualRunTest extends AccrualTestCase
         $this->assertSame(1, $run->failed_items);
         $this->assertCount(1, $runs->errors($run, false));
 
-        $this->app->bind(\App\Domain\Leave\Contracts\LeaveLockGuard::class, \App\Domain\Leave\Locks\DatabaseLeaveLockGuard::class);
+        $this->app->bind(LeaveLockGuard::class, DatabaseLeaveLockGuard::class);
         $this->app->forgetInstance(LedgerService::class);
         $this->app->forgetInstance(AccrualRunService::class);
         $retried = app(AccrualRunService::class)->retry($run->refresh());
@@ -103,17 +109,17 @@ class AccrualRunTest extends AccrualTestCase
         $e = $this->hire('Asha Rao', ['joined_on' => '2024-01-01']);
         $old = app(AccountService::class)->ensure($e->id, $this->al->id, '2025-06-01');
         app(LedgerService::class)->post(new LedgerPosting($old->id, 'opening', 'opening', '9.5', '2025-01-01', 'seed:old'));
-        $carry = app(\App\Domain\Leave\CarryForward\CarryForwardService::class);
+        $carry = app(CarryForwardService::class);
 
         $preview = $carry->preview(['as_of' => '2026-02-01']);
         $this->assertSame('preview', $preview['items'][0]->status);
-        $this->assertSame('4.0000', \App\Domain\Leave\Support\Units::normalize($preview['items'][0]->getRawOriginal('carried_units')));
+        $this->assertSame('4.0000', Units::normalize($preview['items'][0]->getRawOriginal('carried_units')));
         $this->assertSame('open', $old->refresh()->status);
 
         $res = $carry->run(['as_of' => '2026-02-01']);
         $item = $res['items'][0];
         $this->assertSame('posted', $item->status);
-        $this->assertSame('5.5000', \App\Domain\Leave\Support\Units::normalize($item->getRawOriginal('forfeited_units')));
+        $this->assertSame('5.5000', Units::normalize($item->getRawOriginal('forfeited_units')));
         $this->assertSame('closed', $old->refresh()->status);
         $new = LeaveAccount::query()->where('employee_id', $e->id)->where('period_start', '2026-01-01')->firstOrFail();
         $bal = app(BalanceService::class)->balance($new, '2026-02-01');
@@ -125,6 +131,31 @@ class AccrualRunTest extends AccrualTestCase
         $count = LeaveLedgerEntry::query()->count();
         $carry->run(['as_of' => '2026-02-01']);
         $this->assertSame($count, LeaveLedgerEntry::query()->count());
+    }
+
+    public function test_negative_balance_is_carried_as_debt_even_when_positive_carry_rule_is_none(): void
+    {
+        $this->setUpLeave(['entitlement' => ['basis' => 'annual', 'amount' => '10'], 'carry_forward' => ['mode' => 'none']]);
+        $employee = $this->hire('Asha Rao', ['joined_on' => '2024-01-01']);
+        $old = app(AccountService::class)->ensure($employee->id, $this->al->id, '2025-06-01');
+        $ledger = app(LedgerService::class);
+        $ledger->post(new LedgerPosting($old->id, 'opening', 'opening', '5', '2025-01-01', 'negative-carry:opening'));
+        $ledger->post(new LedgerPosting($old->id, 'consumption', 'consumed', '-7', '2025-12-31', 'negative-carry:usage'));
+        $carry = app(CarryForwardService::class);
+
+        $preview = $carry->preview(['as_of' => '2026-02-01']);
+        $this->assertSame('-2.0000', Units::normalize($preview['items'][0]->getRawOriginal('carried_units')));
+        $this->assertSame('0.0000', Units::normalize($preview['items'][0]->getRawOriginal('forfeited_units')));
+        $result = $carry->run(['as_of' => '2026-02-01']);
+        $this->assertSame('posted', $result['items'][0]->status);
+        $this->assertSame('closed', $old->refresh()->status);
+        $this->assertSame('0.0000', app(BalanceService::class)->balance($old, '2026-02-01')->available);
+
+        $next = LeaveAccount::query()->where('employee_id', $employee->id)->where('period_start', '2026-01-01')->firstOrFail();
+        $this->assertSame('-2.0000', app(BalanceService::class)->balance($next, '2026-02-01')->available);
+        $debt = LeaveLedgerEntry::query()->where('account_id', $next->id)->where('entry_type', 'carry_forward_in')->firstOrFail();
+        $this->assertSame('-2.0000', Units::normalize($debt->getRawOriginal('units')));
+        $this->assertNull($debt->expires_on);
     }
 
     public function test_expiry_consumes_unused_lot_alerts_once_and_planner_orders_lots(): void
@@ -147,7 +178,7 @@ class AccrualRunTest extends AccrualTestCase
         $this->assertSame($c->id, $carried['allocations'][0]['source_entry_id']);
 
         // alert fires inside the 30-day window once
-        $this->travelTo(\Carbon\CarbonImmutable::parse('2026-10-15 10:00', 'Asia/Kolkata'));
+        $this->travelTo(CarbonImmutable::parse('2026-10-15 10:00', 'Asia/Kolkata'));
         $expiry = app(ExpiryService::class);
         $this->assertSame(1, $expiry->alerts('2026-10-15')['notified']);
         $this->assertSame(0, $expiry->alerts('2026-10-15')['notified']);

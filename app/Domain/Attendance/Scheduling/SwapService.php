@@ -55,17 +55,24 @@ final class SwapService
             Fail::field('work_date', 'You have no shift on that date to swap or change.');
         }
         $counterpart = null;
+        $counterpartDate = null;
         $toShift = null;
         if ($type === 'swap') {
             $counterpart = ! empty($in['counterpart_uuid']) ? Employee::query()->where('uuid', $in['counterpart_uuid'])->first() : null;
             if (! $counterpart || $counterpart->id === $requester->id) {
                 Fail::field('counterpart_uuid', 'Choose a colleague to swap with.');
             }
-            $theirs = $this->resolver->resolve($counterpart->id, $date);
-            if ($theirs->kind !== 'working') {
-                Fail::field('counterpart_uuid', 'That colleague has no shift on that date.');
+            $counterpartDate = $in['counterpart_date'] ?? $date;
+            $parsedCounterpartDate = is_string($counterpartDate) ? CarbonImmutable::createFromFormat('!Y-m-d', $counterpartDate) : false;
+            if (! $parsedCounterpartDate || $parsedCounterpartDate->format('Y-m-d') !== $counterpartDate) {
+                Fail::field('counterpart_date', 'Enter the colleague shift date (YYYY-MM-DD).');
             }
-            $this->assertEligible($requester, $counterpart, $date, $cfg);
+            $theirs = $this->resolver->resolve($counterpart->id, $counterpartDate);
+            if ($theirs->kind !== 'working') {
+                Fail::field('counterpart_date', 'That colleague has no shift on that date.');
+            }
+            $this->assertEligible($requester, $counterpart, $date, $counterpartDate, $cfg);
+            $this->assertRestrictions($counterpart, $theirs, $counterpartDate, $cfg, false);
             $toShift = Shift::query()->find($theirs->shiftId);
         } else {
             $toShift = ! empty($in['to_shift_uuid']) ? Shift::query()->where('uuid', $in['to_shift_uuid'])->first() : null;
@@ -77,20 +84,20 @@ final class SwapService
             }
         }
         $this->assertRestrictions($requester, $mine, $date, $cfg);
-        $violations = $this->violations($requester->id, $counterpart?->id, $date, $mine->shiftId, $toShift?->id, $type);
+        $violations = $this->violations($requester->id, $counterpart?->id, $date, $counterpartDate ?? $date, $mine->shiftId, $toShift?->id, $type);
         if ($violations) {
             Fail::business('swap_violates_rules', 'This request would break a scheduling rule: '.$violations[0]['message'], 422, ['conflicts' => $violations]);
         }
         $approver = $this->approverFor($requester, $date);
 
-        return DB::transaction(function () use ($requester, $counterpart, $toShift, $type, $date, $reason, $mine, $approver, $actor) {
-            $swap = ShiftSwapRequest::create(['requester_id' => $requester->id, 'counterpart_id' => $counterpart?->id, 'type' => $type, 'work_date' => $date, 'counterpart_date' => $counterpart ? $date : null,
+        return DB::transaction(function () use ($requester, $counterpart, $counterpartDate, $toShift, $type, $date, $reason, $mine, $approver, $actor) {
+            $swap = ShiftSwapRequest::create(['requester_id' => $requester->id, 'counterpart_id' => $counterpart?->id, 'type' => $type, 'work_date' => $date, 'counterpart_date' => $counterpartDate,
                 'from_shift_id' => $mine->shiftId, 'to_shift_id' => $toShift?->id, 'reason' => $reason, 'status' => $counterpart ? 'pending' : 'pending',
                 'validation' => ['checked_at' => now()->toIso8601String(), 'rules' => 'notice, monthly limit, eligibility, locks, conflicts'], 'approver_user_id' => $approver?->id]);
-            Audit::record('requested', 'attendance', 'shift_swap:'.$swap->uuid, ['type' => $type, 'date' => $date]);
+            Audit::record('requested', 'attendance', 'shift_swap:'.$swap->uuid, ['type' => $type, 'date' => $date, 'counterpart_date' => $counterpartDate]);
             $this->events->record('ShiftSwapRequested', ['employee' => $requester, 'summary' => "Shift {$type} requested for {$date}", 'subject' => ['shift_swap', $swap->id], 'effective_date' => $date, 'payload' => ['swap' => $swap->uuid]]);
             if ($counterpart) {
-                $this->tell($counterpart, 'A colleague asked to swap shifts', "{$requester->person->display_name} asked to swap shifts with you on {$date}. Accept or decline in your schedule.", '/attendance?tab=schedule', $swap, 'consent');
+                $this->tell($counterpart, 'A colleague asked to swap shifts', "{$requester->person->display_name} asked to swap your {$counterpartDate} shift for their {$date} shift. Accept or decline in your schedule.", '/attendance?tab=schedule', $swap, 'consent');
             } else {
                 $this->routeToApprover($swap, $requester, $approver);
             }
@@ -162,21 +169,29 @@ final class SwapService
                 return $swap;
             }
             SchedulingEffects::assertUnlocked($requester->id, $swap->work_date);
+            $counterpartDate = $swap->counterpart_date ?: $swap->work_date;
             if ($counterpart) {
-                SchedulingEffects::assertUnlocked($counterpart->id, $swap->work_date);
+                SchedulingEffects::assertUnlocked($counterpart->id, $counterpartDate);
+                $requesterSchedule = $this->resolver->resolve($requester->id, $swap->work_date);
+                $counterpartSchedule = $this->resolver->resolve($counterpart->id, $counterpartDate);
+                abort_if($requesterSchedule->kind !== 'working' || $requesterSchedule->shiftId !== $swap->from_shift_id || $counterpartSchedule->kind !== 'working' || $counterpartSchedule->shiftId !== $swap->to_shift_id,
+                    409, 'One of the shifts changed after this request was submitted. Ask the colleague to submit a new swap.');
             }
-            $violations = $this->violations($requester->id, $counterpart?->id, $swap->work_date, $swap->from_shift_id, $swap->to_shift_id, $swap->type);
+            $violations = $this->violations($requester->id, $counterpart?->id, $swap->work_date, $counterpartDate, $swap->from_shift_id, $swap->to_shift_id, $swap->type);
             if ($violations) {
                 Fail::business('swap_violates_rules', 'Approving this would now break a scheduling rule: '.$violations[0]['message'], 422, ['conflicts' => $violations]);
             }
             $reason = "Shift {$swap->type} approved (request {$swap->uuid})";
             $this->rosters->writePublished($requester->id, $swap->work_date, 'shift', $swap->to_shift_id, $reason, $user);
             if ($counterpart) {
-                $this->rosters->writePublished($counterpart->id, $swap->work_date, 'shift', $swap->from_shift_id, $reason, $user);
+                $this->rosters->writePublished($counterpart->id, $counterpartDate, 'shift', $swap->from_shift_id, $reason, $user);
             }
             $swap->update(['status' => 'approved', 'decided_at' => now(), 'decision_comment' => $comment, 'approver_user_id' => $user->id]);
             $this->finish($swap, $requester, $counterpart, 'approved', $user);
-            SchedulingEffects::recalculate(array_filter([$requester->id, $counterpart?->id]), $swap->work_date, $swap->work_date, $user->id, 'swap:'.$swap->id);
+            SchedulingEffects::recalculate([$requester->id], $swap->work_date, $swap->work_date, $user->id, 'swap:'.$swap->id.':requester');
+            if ($counterpart) {
+                SchedulingEffects::recalculate([$counterpart->id], $counterpartDate, $counterpartDate, $user->id, 'swap:'.$swap->id.':counterpart');
+            }
 
             return $swap;
         });
@@ -193,10 +208,10 @@ final class SwapService
 
     // ---- helpers -------------------------------------------------------------------------------------------------------------
 
-    private function assertEligible(Employee $a, Employee $b, string $date, array $cfg): void
+    private function assertEligible(Employee $a, Employee $b, string $date, string $counterpartDate, array $cfg): void
     {
         $x = $a->assignmentOn($date);
-        $y = $b->assignmentOn($date);
+        $y = $b->assignmentOn($counterpartDate);
         foreach (['same_team_only' => ['team_id', 'team'], 'same_department_only' => ['department_id', 'department'], 'same_location_only' => ['location_id', 'location']] as $key => [$col, $label]) {
             if ($cfg[$key] && (($x->{$col} ?? null) === null || ($x->{$col} ?? null) !== ($y->{$col} ?? null))) {
                 Fail::field('counterpart_uuid', "Swaps are only allowed with someone in your own {$label}.");
@@ -204,7 +219,7 @@ final class SwapService
         }
     }
 
-    private function assertRestrictions(Employee $requester, $mine, string $date, array $cfg): void
+    private function assertRestrictions(Employee $requester, $mine, string $date, array $cfg, bool $checkMonthlyLimit = true): void
     {
         $today = SchedulingEffects::today();
         if ($date < $today) {
@@ -215,7 +230,7 @@ final class SwapService
             Fail::field('work_date', "Requests need at least {$cfg['min_notice_hours']} hours' notice before the shift starts.");
         }
         $month = substr($date, 0, 7);
-        if ($cfg['max_per_month'] !== null) {
+        if ($checkMonthlyLimit && $cfg['max_per_month'] !== null) {
             $used = ShiftSwapRequest::query()->where('requester_id', $requester->id)->whereNotIn('status', ['rejected', 'withdrawn', 'cancelled'])->where('work_date', 'like', $month.'%')->count();
             if ($used >= (int) $cfg['max_per_month']) {
                 Fail::field('work_date', "You have already used your {$cfg['max_per_month']} shift change request(s) for {$month}.");
@@ -225,18 +240,23 @@ final class SwapService
     }
 
     /** Conflicts (rest, overlap, limits ...) the swapped schedule would produce. */
-    private function violations(int $requesterId, ?int $counterpartId, string $date, ?int $fromShift, ?int $toShift, string $type): array
+    private function violations(int $requesterId, ?int $counterpartId, string $date, string $counterpartDate, ?int $fromShift, ?int $toShift, string $type): array
     {
         $overlay = [$requesterId => [$date => ['entry_type' => 'shift', 'shift_id' => $toShift]]];
         if ($counterpartId) {
-            $overlay[$counterpartId] = [$date => ['entry_type' => 'shift', 'shift_id' => $fromShift]];
+            $overlay[$counterpartId] = [$counterpartDate => ['entry_type' => 'shift', 'shift_id' => $fromShift]];
+        }
+        $out = [];
+        foreach ($overlay as $employeeId => $days) {
+            foreach ($days as $workDate => $entry) {
+                $existing = array_map(fn ($c) => $c['employee_id'].'|'.$c['date'].'|'.$c['code'], $this->conflicts->detect([(int) $employeeId], $workDate, $workDate));
+                // Only problems the swap would INTRODUCE count; pre-existing issues are not the employee's doing.
+                $out = [...$out, ...array_values(array_filter($this->conflicts->detect([(int) $employeeId], $workDate, $workDate, [(int) $employeeId => [$workDate => $entry]]),
+                    fn ($c) => ! in_array($c['employee_id'].'|'.$c['date'].'|'.$c['code'], $existing, true)))];
+            }
         }
 
-        $ids = array_keys($overlay);
-        $existing = array_map(fn ($c) => $c['employee_id'].'|'.$c['date'].'|'.$c['code'], $this->conflicts->detect($ids, $date, $date));
-
-        // Only problems the swap would INTRODUCE count; pre-existing issues are not the requester's doing.
-        return array_values(array_filter($this->conflicts->detect($ids, $date, $date, $overlay), fn ($c) => ! in_array($c['employee_id'].'|'.$c['date'].'|'.$c['code'], $existing, true)));
+        return $out;
     }
 
     public function approverFor(Employee $requester, string $date): ?User
@@ -314,12 +334,13 @@ final class SwapService
     private function finish(ShiftSwapRequest $swap, Employee $requester, ?Employee $counterpart, string $outcome, User $user): void
     {
         $this->closeTasks($swap);
+        $counterpartDate = $swap->counterpart_date ?: $swap->work_date;
         Audit::record($outcome, 'attendance', 'shift_swap:'.$swap->uuid, ['by' => $user->id]);
-        $this->events->record($outcome === 'approved' ? 'ShiftSwapApproved' : 'ShiftSwapRejected', ['employee' => $requester, 'summary' => "Shift {$swap->type} {$outcome} for {$swap->work_date}", 'subject' => ['shift_swap', $swap->id], 'effective_date' => $swap->work_date, 'payload' => ['swap' => $swap->uuid]]);
-        $this->tell($requester, "Shift {$swap->type} {$outcome}", "Your request for {$swap->work_date} was {$outcome}.", '/attendance?tab=schedule', $swap, null);
+        $this->events->record($outcome === 'approved' ? 'ShiftSwapApproved' : 'ShiftSwapRejected', ['employee' => $requester, 'summary' => "Shift {$swap->type} {$outcome} for {$swap->work_date}", 'subject' => ['shift_swap', $swap->id], 'effective_date' => $swap->work_date, 'payload' => ['swap' => $swap->uuid, 'counterpart_date' => $counterpartDate]]);
+        $this->tell($requester, "Shift {$swap->type} {$outcome}", "Your request for {$swap->work_date}".($counterpart && $counterpartDate !== $swap->work_date ? " in exchange for {$counterpartDate}" : '')." was {$outcome}.", '/attendance?tab=schedule', $swap, null);
         if ($counterpart && $outcome === 'approved') {
-            $this->events->record('ShiftChanged', ['employee' => $counterpart, 'summary' => "Shift swapped on {$swap->work_date}", 'effective_date' => $swap->work_date, 'payload' => ['swap' => $swap->uuid]]);
-            $this->tell($counterpart, 'Your shift changed', "Your shift on {$swap->work_date} changed after an approved swap.", '/attendance?tab=schedule', $swap, null);
+            $this->events->record('ShiftChanged', ['employee' => $counterpart, 'summary' => "Shift swapped on {$counterpartDate}", 'effective_date' => $counterpartDate, 'payload' => ['swap' => $swap->uuid]]);
+            $this->tell($counterpart, 'Your shift changed', "Your shift on {$counterpartDate} changed after an approved swap.", '/attendance?tab=schedule', $swap, null);
         }
         if ($outcome === 'approved') {
             $this->events->record('ShiftChanged', ['employee' => $requester, 'summary' => "Shift changed on {$swap->work_date} (swap)", 'effective_date' => $swap->work_date, 'payload' => ['swap' => $swap->uuid]]);
@@ -331,7 +352,7 @@ final class SwapService
         $codes = Shift::query()->pluck('code', 'id');
         $names = DB::table('employees')->join('people', 'people.id', '=', 'employees.person_id')->whereIn('employees.id', array_filter([$s->requester_id, $s->counterpart_id]))->pluck('people.display_name', 'employees.id');
 
-        return ['uuid' => $s->uuid, 'type' => $s->type, 'status' => $s->status, 'work_date' => $s->work_date, 'requester' => $names[$s->requester_id] ?? null, 'counterpart' => $s->counterpart_id ? ($names[$s->counterpart_id] ?? null) : null,
+        return ['uuid' => $s->uuid, 'type' => $s->type, 'status' => $s->status, 'work_date' => $s->work_date, 'counterpart_date' => $s->counterpart_date, 'requester' => $names[$s->requester_id] ?? null, 'counterpart' => $s->counterpart_id ? ($names[$s->counterpart_id] ?? null) : null,
             'from_shift' => $s->from_shift_id ? ($codes[$s->from_shift_id] ?? null) : null, 'to_shift' => $s->to_shift_id ? ($codes[$s->to_shift_id] ?? null) : null, 'reason' => $s->reason,
             'decision_comment' => $s->decision_comment, 'decided_at' => $s->decided_at?->toIso8601String(), 'created_at' => $s->created_at?->toIso8601String()];
     }

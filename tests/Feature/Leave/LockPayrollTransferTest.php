@@ -2,11 +2,17 @@
 
 namespace Tests\Feature\Leave;
 
+use App\Domain\Access\WorkspaceProvisioner;
+use App\Domain\Events\DomainEvents;
 use App\Domain\Leave\Ledger\BalanceService;
+use App\Domain\Leave\Models\LeaveAccount;
 use App\Domain\Leave\Models\LeaveLedgerEntry;
-use App\Models\User;
+use App\Domain\Leave\Models\LeaveTransfer;
+use App\Models\Tenant;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 use Tests\Concerns\LeaveOpsFixtures;
 use Tests\Concerns\PeopleFixtures;
 use Tests\TestCase;
@@ -35,7 +41,7 @@ class LockPayrollTransferTest extends TestCase
         try {
             $this->credit($acct, '5', 'k-locked', '2026-09-10');
             $this->fail('expected lock');
-        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+        } catch (HttpException $e) {
             $this->assertSame(423, $e->getStatusCode());
         }
         $this->postJson("/api/v1/leave/locks/$uuid/unlock-request", ['reason' => 'late fix'])->assertOk();
@@ -63,7 +69,7 @@ class LockPayrollTransferTest extends TestCase
         $unpaid = $this->leaveType('UL', ['category' => 'unpaid']);
         $this->approvedLeave($a, $al, ['2026-09-10', '2026-09-11'], ['decided_at' => '2026-09-05 10:00:00']);
         $this->approvedLeave($a, $unpaid, ['2026-09-20'], ['pay_class' => 'unpaid', 'decided_at' => '2026-10-06 10:00:00']);
-        DB::table('leave_settlement_references')->insert(['uuid' => (string) \Illuminate\Support\Str::uuid(), 'tenant_id' => $a->tenant_id, 'employee_id' => $a->id, 'leave_type_id' => $al->id, 'kind' => 'encashment',
+        DB::table('leave_settlement_references')->insert(['uuid' => (string) Str::uuid(), 'tenant_id' => $a->tenant_id, 'employee_id' => $a->id, 'leave_type_id' => $al->id, 'kind' => 'encashment',
             'units' => '2', 'status' => 'approved', 'as_of' => '2026-09-30', 'created_at' => now(), 'updated_at' => now()]);
         $this->signIn($this->admin);
         $this->putJson('/api/v1/attendance/settings/cutoffs', ['payroll_cutoff_day' => 3]);
@@ -79,7 +85,7 @@ class LockPayrollTransferTest extends TestCase
         $this->getJson('/api/v1/leave/payroll/contract/batches/none')->assertNotFound();
     }
 
-    public function test_separation_encashes_expires_and_rehire_restores(): void
+    public function test_separation_encashes_and_expires_balances(): void
     {
         $a = $this->hire('Asha Rao');
         $al = $this->leaveType('AL', ['config' => ['encashment' => ['on_separation' => true, 'max_units' => '4']]]);
@@ -95,6 +101,43 @@ class LockPayrollTransferTest extends TestCase
         $this->assertSame(1, LeaveLedgerEntry::query()->where('entry_type', 'encashment')->count());
         $this->assertSame('0.0000', app(BalanceService::class)->balance($acct, '2026-10-07')->available);
         $this->assertSame(1, DB::table('leave_settlement_references')->where('employee_id', $a->id)->count());
+    }
+
+    public function test_rehire_restores_prior_employment_balance(): void
+    {
+        $previous = $this->hire('Asha Rao');
+        $rehired = $this->hire('Asha Rao Rehired');
+        $al = $this->leaveType('AL', ['config' => ['rehire' => ['restore' => 'all']]]);
+        $oldAccount = $this->leaveAccount($previous, $al);
+        $this->credit($oldAccount, '6', 'rehire:source', '2026-01-01');
+        $this->signIn($this->admin);
+
+        $transfer = $this->postJson('/api/v1/leave/transfers/preview', ['employee' => $rehired->uuid, 'trigger' => 'rehire', 'previous_employee' => $previous->uuid, 'effective_date' => '2026-10-07'])
+            ->assertCreated()->assertJsonPath('data.plan.items.0.restore.units', '6.0000')->json('data.uuid');
+        $this->postJson("/api/v1/leave/transfers/$transfer/apply")->assertOk()->assertJsonPath('data.status', 'applied');
+        $this->context($this->admin->tenant_id);
+
+        $restored = LeaveAccount::query()->where('employee_id', $rehired->id)->where('leave_type_id', $al->id)->firstOrFail();
+        $this->assertSame('0.0000', app(BalanceService::class)->balance($oldAccount, '2026-10-07')->available);
+        $this->assertSame('6.0000', app(BalanceService::class)->balance($restored, '2026-10-07')->available);
+    }
+
+    public function test_people_transfer_event_creates_a_leave_preview_without_applying_it(): void
+    {
+        $employee = $this->hire('Asha Rao');
+        $tenant = Tenant::findOrFail($employee->tenant_id);
+        $settings = $tenant->settings ?? [];
+        $settings['modules'] = ['leave'];
+        $tenant->settings = $settings;
+        $tenant->save();
+        $this->context($employee->tenant_id);
+
+        app(DomainEvents::class)->record('EmployeeTransferred', ['employee' => $employee, 'summary' => 'Employee transferred', 'effective_date' => '2026-10-07', 'payload' => ['fields' => ['country']]]);
+
+        $preview = LeaveTransfer::query()->where('employee_id', $employee->id)->where('trigger', 'transfer')->firstOrFail();
+        $this->assertSame('preview', $preview->status);
+        $this->assertSame('2026-10-07', substr((string) $preview->getRawOriginal('effective_date'), 0, 10));
+        $this->assertSame(0, LeaveLedgerEntry::query()->count(), 'People events prepare a preview but never post ledger entries.');
     }
 
     public function test_convert_uses_mapping_and_preserve_posts_nothing(): void
@@ -114,7 +157,7 @@ class LockPayrollTransferTest extends TestCase
         $this->postJson("/api/v1/leave/transfers/$c/apply")->assertOk();
         $this->context($this->admin->tenant_id);
         $this->assertSame('0.0000', app(BalanceService::class)->balance($acct, '2026-10-08')->available);
-        $target = \App\Domain\Leave\Models\LeaveAccount::query()->where('leave_type_id', $y->id)->firstOrFail();
+        $target = LeaveAccount::query()->where('leave_type_id', $y->id)->firstOrFail();
         $this->assertSame('3.0000', app(BalanceService::class)->balance($target, '2026-10-08')->available);
     }
 
@@ -133,7 +176,7 @@ class LockPayrollTransferTest extends TestCase
         $this->getJson('/api/v1/leave/confidence?employee='.$a->uuid)->assertOk()->assertJsonPath('level', 'confirmed');
         $this->getJson('/api/v1/leave/time-story?employee='.$a->uuid)->assertOk();
         $this->postJson('/api/v1/leave/reports/requests/export', ['format' => 'csv'])->assertStatus(202);
-        $other = app(\App\Domain\Access\WorkspaceProvisioner::class)->create('Beta', 'beta', 'admin@beta.test', 'StrongPassword123');
+        $other = app(WorkspaceProvisioner::class)->create('Beta', 'beta', 'admin@beta.test', 'StrongPassword123');
         $this->signIn($other)->getJson('/api/v1/leave/explain/balance?employee='.$a->uuid)->assertNotFound();
     }
 

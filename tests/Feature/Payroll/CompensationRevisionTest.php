@@ -4,8 +4,15 @@ namespace Tests\Feature\Payroll;
 
 use App\Domain\Payroll\Contracts\CompensationResolver;
 use App\Domain\Payroll\Groups\GroupResolver;
+use App\Domain\Payroll\Models\CompensationRevision;
+use App\Domain\Payroll\Models\CompensationRevisionBatch;
 use App\Domain\Payroll\Models\EmployeeCompensation;
+use App\Domain\People\Models\Employee;
+use App\Models\Permission;
+use App\Models\Role;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Tests\Concerns\PayrollFixtures;
@@ -14,9 +21,14 @@ use Tests\TestCase;
 
 class CompensationRevisionTest extends TestCase
 {
-    use RefreshDatabase, PeopleFixtures, PayrollFixtures;
+    use PayrollFixtures, PeopleFixtures, RefreshDatabase;
 
-    protected function setUp(): void { parent::setUp(); $this->bootTenant(); $this->signIn($this->admin); }
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->bootTenant();
+        $this->signIn($this->admin);
+    }
 
     private function comp(string $code, array $o = []): string
     {
@@ -26,7 +38,7 @@ class CompensationRevisionTest extends TestCase
         return $uuid;
     }
 
-    /** @return array{0:string,1:\App\Domain\People\Models\Employee,2:array<string,string>} */
+    /** @return array{0:string,1:Employee,2:array<string,string>} */
     private function setup3(): array
     {
         $group = $this->payrollGroup();
@@ -38,7 +50,10 @@ class CompensationRevisionTest extends TestCase
         return [$group->uuid, $employee, $c];
     }
 
-    private function checker(): \App\Models\User { return $this->userWithRole('Workspace administrator', 'checker@alpha.test'); }
+    private function checker(): User
+    {
+        return $this->userWithRole('Workspace administrator', 'checker@alpha.test');
+    }
 
     public function test_formula_and_percentage_components_resolve_with_trace_and_derived_rates(): void
     {
@@ -74,9 +89,12 @@ class CompensationRevisionTest extends TestCase
         $this->getJson('/api/v1/compensation/employees/'.$employee->uuid.'/compensation?as_of=2026-10-10')->assertOk()->assertJsonPath('compensation.lines.0.amount', '50000.00');
         $this->assertDatabaseHas('audit_logs', ['action' => 'compensation.viewed']);
         $this->context($checker->tenant_id);
-        $role = \App\Models\Role::create(['name' => 'Viewer only', 'tenant_id' => $checker->tenant_id, 'data_scope' => 'tenant']);
-        $role->permissions()->attach(\App\Models\Permission::where('key', 'payroll.compensation.view')->pluck('id'));
-        $viewer = new \App\Models\User(['name' => 'V', 'email' => 'v@alpha.test', 'password' => 'StrongPassword123']); $viewer->tenant_id = $checker->tenant_id; $viewer->save(); $viewer->roles()->attach($role->id);
+        $role = Role::create(['name' => 'Viewer only', 'tenant_id' => $checker->tenant_id, 'data_scope' => 'tenant']);
+        $role->permissions()->attach(Permission::where('key', 'payroll.compensation.view')->pluck('id'));
+        $viewer = new User(['name' => 'V', 'email' => 'v@alpha.test', 'password' => 'StrongPassword123']);
+        $viewer->tenant_id = $checker->tenant_id;
+        $viewer->save();
+        $viewer->roles()->attach($role->id);
         $this->signIn($viewer->refresh())->getJson('/api/v1/compensation/employees/'.$employee->uuid.'/compensation?as_of=2026-10-10')->assertOk()->assertJsonPath('compensation.masked', true)->assertJsonPath('compensation.lines.0.amount', null);
     }
 
@@ -117,6 +135,67 @@ class CompensationRevisionTest extends TestCase
         $this->assertSame(1, EmployeeCompensation::where('status', 'superseded')->count());
         $this->assertSame(3, EmployeeCompensation::count());
         $this->getJson('/api/v1/compensation/employees/'.$employee->uuid.'/compensation/history')->assertOk()->assertJsonCount(3, 'data');
+    }
+
+    public function test_revision_batch_previews_rows_then_submits_valid_revisions_for_independent_review(): void
+    {
+        [, $employee, $c] = $this->setup3();
+        $checker = $this->checker();
+        $initial = $this->postJson('/api/v1/compensation/employees/'.$employee->uuid.'/compensation', ['effective_from' => '2026-01-05', 'reason' => 'Initial', 'idempotency_key' => (string) Str::uuid(),
+            'lines' => [['component_uuid' => $c['BASE'], 'amount' => '50000.00']]])->assertCreated()->json('uuid');
+        $this->context($this->admin->tenant_id);
+        $this->signIn($checker)->postJson('/api/v1/compensation/compensations/'.$initial.'/decision', ['decision' => 'approved'])->assertOk();
+        $this->context($checker->tenant_id);
+        $this->signIn($this->admin);
+        $body = ['name' => 'November increments', 'type' => 'increment', 'effective_date' => '2026-11-01', 'reason' => 'Annual review', 'idempotency_key' => (string) Str::uuid(), 'employees' => [
+            ['employee_uuid' => $employee->uuid, 'lines' => [['component_uuid' => $c['BASE'], 'amount' => '55000.00']]],
+            ['employee_uuid' => (string) Str::uuid(), 'lines' => [['component_uuid' => $c['BASE'], 'amount' => '55000.00']]],
+        ]];
+
+        $preview = $this->postJson('/api/v1/compensation/revision-batches/preview', $body)->assertOk()->assertJsonPath('persisted', false)->assertJsonPath('employees_ok', 1)->assertJsonPath('employees_failed', 1)->json();
+        $this->context($this->admin->tenant_id);
+        $this->assertSame(0, CompensationRevision::count());
+        $batch = $this->postJson('/api/v1/compensation/revision-batches', $body)->assertCreated()->assertJsonPath('status', 'submitted')->assertJsonPath('employees.submitted', 1)->assertJsonPath('employees.failed', 1)->json();
+        $this->context($this->admin->tenant_id);
+        $this->postJson('/api/v1/compensation/revision-batches', $body)->assertCreated()->assertJsonPath('uuid', $batch['uuid']);
+        $this->getJson('/api/v1/compensation/revision-batches')->assertOk()->assertJsonPath('data.0.uuid', $batch['uuid']);
+        $this->context($this->admin->tenant_id);
+        $changed = $body;
+        $changed['employees'][0]['lines'][0]['amount'] = '56000.00';
+        $this->postJson('/api/v1/compensation/revision-batches', $changed)->assertStatus(409);
+        $this->context($this->admin->tenant_id);
+        $this->assertSame(1, CompensationRevision::where('batch_id', CompensationRevisionBatch::where('uuid', $batch['uuid'])->value('id'))->count());
+
+        $revision = $batch['revisions'][0]['uuid'];
+        $this->signIn($checker)->postJson('/api/v1/compensation/revisions/'.$revision.'/decision', ['decision' => 'approved'])->assertOk();
+        $this->context($checker->tenant_id);
+        $this->getJson('/api/v1/compensation/revision-batches/'.$batch['uuid'])->assertOk()->assertJsonPath('status', 'partially_applied');
+    }
+
+    public function test_compensation_csv_import_previews_without_mutation_and_commits_idempotently(): void
+    {
+        [, $employee, $c] = $this->setup3();
+        $checker = $this->checker();
+        $initial = $this->postJson('/api/v1/compensation/employees/'.$employee->uuid.'/compensation', ['effective_from' => '2026-01-05', 'reason' => 'Initial', 'idempotency_key' => (string) Str::uuid(), 'lines' => [['component_uuid' => $c['BASE'], 'amount' => '50000.00']]])->assertCreated()->json('uuid');
+        $this->context($this->admin->tenant_id);
+        $this->signIn($checker)->postJson('/api/v1/compensation/compensations/'.$initial.'/decision', ['decision' => 'approved'])->assertOk();
+        $this->context($checker->tenant_id);
+        $this->signIn($this->admin);
+        $component = DB::table('salary_components')->where('uuid', $c['BASE'])->first();
+        $content = "employee_number,component_code,amount\n{$employee->employee_number},{$component->code},55000.00\nUNKNOWN,BASE,100.00\n";
+        $response = $this->postJson('/api/v1/compensation/imports/compensation/preview', [
+            'file' => UploadedFile::fake()->createWithContent('revision.csv', $content), 'type' => 'increment', 'effective_date' => '2026-11-01', 'reason' => 'Annual review',
+        ]);
+        $this->assertSame(1, $response->json('rows_ok'), json_encode($response->json()));
+        $preview = $response->assertCreated()->assertJsonPath('status', 'previewed')->assertJsonPath('rows_total', 2)->assertJsonPath('rows_error', 1)->json();
+        $this->context($this->admin->tenant_id);
+        $this->assertSame(0, CompensationRevision::count());
+        $committed = $this->postJson('/api/v1/compensation/imports/compensation/'.$preview['uuid'].'/commit')->assertOk()->assertJsonPath('status', 'committed')->json();
+        $this->context($this->admin->tenant_id);
+        $this->assertSame(1, CompensationRevision::where('employee_id', $employee->id)->count());
+        $this->postJson('/api/v1/compensation/imports/compensation/'.$preview['uuid'].'/commit')->assertOk()->assertJsonPath('batch_uuid', $committed['batch_uuid']);
+        $this->context($this->admin->tenant_id);
+        $this->assertSame(1, CompensationRevision::where('employee_id', $employee->id)->count());
     }
 
     public function test_pending_and_rejected_are_never_resolved_and_unknown_components_fail(): void

@@ -6,6 +6,7 @@ use App\Domain\Attendance\Contracts\LeaveDataProvider;
 use App\Domain\Leave\Models\LeaveRequest;
 use App\Domain\Leave\Models\LeaveType;
 use App\Domain\Leave\Requests\DecisionService;
+use App\Domain\Leave\Requests\RequestService;
 use App\Models\WorkItem;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -82,6 +83,21 @@ class RequestFlowTest extends TestCase
         $c = $this->submit()['data']['uuid'];
         $this->as($this->emp)->postJson("/api/v1/leave/requests/$c/withdraw")->assertOk()->assertJsonPath('data.status', 'withdrawn');
         $this->assertSame('10.0000', $this->available($this->acct));
+    }
+
+    public function test_stale_pending_request_expires_once_and_releases_its_reservation(): void
+    {
+        $uuid = $this->submit()['data']['uuid'];
+        $request = LeaveRequest::where('uuid', $uuid)->firstOrFail();
+        $this->travel(91)->days();
+
+        $this->assertTrue(app(RequestService::class)->expireIfOverdue($request));
+        $this->assertFalse(app(RequestService::class)->expireIfOverdue($request->refresh()), 'expiry is idempotent');
+        $this->assertSame('expired', $request->refresh()->status);
+        $this->assertEquals(0, $request->refresh()->getRawOriginal('charged_units'));
+        $this->assertSame('10.0000', $this->available($this->acct));
+        $this->assertSame(0, WorkItem::where('source_entity', 'leave:'.$uuid)->where('status', 'open')->count());
+        $this->assertContains('expire', $request->actions()->pluck('action')->all());
     }
 
     public function test_cancel_and_partial_cancel_reverse_consumption_and_notify_attendance(): void

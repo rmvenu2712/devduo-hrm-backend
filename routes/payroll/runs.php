@@ -32,6 +32,11 @@ Route::post('runs/{uuid}/reopen-decision', [RunController::class, 'reopenDecisio
 Route::post('runs/{uuid}/cancel', [RunController::class, 'cancel'])->middleware('permission:payroll.run');
 
 Route::get('inputs', [InputController::class, 'index'])->middleware('permission:payroll.inputs.manage|payroll.inputs.approve');
+Route::get('inputs/imports', [InputController::class, 'importHistory'])->middleware('permission:payroll.inputs.manage');
+Route::post('inputs/imports/preview', [InputController::class, 'previewImport'])->middleware('permission:payroll.inputs.manage');
+Route::get('inputs/imports/{uuid}', [InputController::class, 'showImport'])->middleware('permission:payroll.inputs.manage');
+Route::post('inputs/imports/{uuid}/commit', [InputController::class, 'commitImport'])->middleware('permission:payroll.inputs.manage');
+Route::post('inputs/imports/{uuid}/retry', [InputController::class, 'retryImport'])->middleware('permission:payroll.inputs.manage');
 Route::post('inputs', [InputController::class, 'store'])->middleware('permission:payroll.inputs.manage');
 Route::post('inputs/{uuid}/decision', [InputController::class, 'decide'])->middleware('permission:payroll.inputs.approve');
 Route::delete('inputs/{uuid}', [InputController::class, 'void'])->middleware('permission:payroll.inputs.manage');

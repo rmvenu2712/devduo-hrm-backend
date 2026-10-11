@@ -3,11 +3,13 @@
 namespace App\Http\Controllers\Payroll\Runs;
 
 use App\Domain\Access\DataScope;
+use App\Domain\Payroll\Inputs\InputImportService;
 use App\Domain\Payroll\Inputs\InputService;
 use App\Domain\Payroll\Models\PayrollAdjustment;
 use App\Domain\Payroll\Models\PayrollInput;
 use App\Domain\Payroll\Models\PayrollPeriod;
 use App\Domain\Payroll\Runs\RunService;
+use App\Domain\Payroll\Support\Decimal;
 use App\Domain\People\Models\Employee;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -33,6 +35,33 @@ final class InputController
         $input = $this->inputs->create($r->user(), $d);
 
         return response()->json($this->inputs->present($input), $input->wasRecentlyCreated ? 201 : 200);
+    }
+
+    public function previewImport(Request $r, InputImportService $imports)
+    {
+        $data = $r->validate(['file' => 'required|file|max:10240', 'period_uuid' => 'required|uuid', 'source' => ['required', Rule::in(InputService::MANUAL_SOURCES)]]);
+
+        return response()->json($imports->preview($r->user(), $data['file'], $data), 201);
+    }
+
+    public function commitImport(Request $r, string $uuid, InputImportService $imports)
+    {
+        return $imports->commit($r->user(), $uuid);
+    }
+
+    public function retryImport(Request $r, string $uuid, InputImportService $imports)
+    {
+        return $imports->retry($r->user(), $uuid);
+    }
+
+    public function importHistory(Request $r, InputImportService $imports)
+    {
+        return ['data' => $imports->history($r->user())];
+    }
+
+    public function showImport(Request $r, string $uuid, InputImportService $imports)
+    {
+        return $imports->show($r->user(), $uuid);
     }
 
     public function decide(Request $r, string $uuid)
@@ -78,6 +107,6 @@ final class InputController
         $a->loadMissing('employee.person');
 
         return ['uuid' => $a->uuid, 'employee_uuid' => $a->employee->uuid, 'employee_name' => $a->employee->person->display_name, 'kind' => $a->kind, 'status' => $a->status, 'component_code' => $a->component_code,
-            'amount' => \App\Domain\Payroll\Support\Decimal::str($a->amount, 4), 'currency' => $a->currency, 'reason' => $a->reason, 'trace' => $a->trace];
+            'amount' => Decimal::str($a->amount, 4), 'currency' => $a->currency, 'reason' => $a->reason, 'trace' => $a->trace];
     }
 }

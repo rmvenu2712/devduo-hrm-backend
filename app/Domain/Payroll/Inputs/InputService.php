@@ -45,7 +45,7 @@ final class InputService
             $input = PayrollInput::create(['employee_id' => $employee->id, 'payroll_group_id' => $period->payroll_group_id, 'period_id' => $period->id, 'source' => $data['source'], 'kind' => $data['kind'],
                 'component_code' => $data['component_code'] ?? null, 'quantity' => $data['quantity'] ?? null, 'amount' => $data['amount'] ?? null, 'currency' => $data['currency'] ?? ($period->group->currency ?? null),
                 'status' => $needsApproval ? 'pending' : 'approved', 'is_final' => true, 'source_ref' => $data['source_ref'] ?? 'manual:'.$actor->id, 'dedupe_key' => $key, 'meta' => $data['meta'] ?? null,
-                'created_by' => $actor->id, 'approved_by' => $needsApproval ? null : $actor->id, 'approved_at' => $needsApproval ? null : now()]);
+                'import_id' => $data['import_id'] ?? null, 'created_by' => $actor->id, 'approved_by' => $needsApproval ? null : $actor->id, 'approved_at' => $needsApproval ? null : now()]);
             Audit::record('payroll.input.created', 'payroll', $input->uuid, ['source' => $input->source, 'status' => $input->status]);
 
             return $input;

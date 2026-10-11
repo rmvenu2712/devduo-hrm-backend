@@ -404,14 +404,15 @@ class ConfigTest extends TestCase
         $this->field(['key' => 'optional', 'label' => 'Optional', 'type' => 'text']);
         $e = $this->hire('Asha Rao');
         $service = app(CustomFieldService::class);
-        $this->assertSame(['badge'], array_column($service->missingRequired($e), 'key'));
+        $this->assertSame([], $service->missingRequired($e), 'a configured default is applied during normal employee creation');
+        $this->assertSame('B-0', $service->valuesFor($this->admin, $e)['badge']);
         try {
             $service->setValues($this->admin, $e, ['badge' => '']);
             $this->fail('required field cannot be cleared');
         } catch (ValidationException $ex) {
             $this->assertStringContainsString('required', $ex->errors()['values.badge'][0]);
         }
-        $this->assertSame(1, $service->applyDefaults($e));
+        $this->assertSame(0, $service->applyDefaults($e), 'applying defaults again is idempotent');
         $this->assertSame([], $service->missingRequired($e));
         $this->assertSame(0, $service->applyDefaults($e));
         $this->assertSame('B-0', $service->valuesFor($this->admin, $e)['badge']);
